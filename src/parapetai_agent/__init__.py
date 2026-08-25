@@ -47,6 +47,7 @@ No module named 'agent_framework'` -- keep this guarded.
 
 from __future__ import annotations
 
+from parapetai_agent.govern import GovernanceDenied, Governor
 from parapetai_agent.identity_store import (
     IdentityKeyKind,
     IdentityStore,
@@ -60,6 +61,8 @@ from parapetai_agent.identity_store import (
 from parapetai_agent.token_identity import identity_from_claims
 
 __all__ = [
+    "GovernanceDenied",
+    "Governor",
     "IdentityKeyKind",
     "IdentityStore",
     "InMemoryIdentityStore",
@@ -78,7 +81,6 @@ try:
     # intentionally re-exported, not dead. See module docstring for why
     # this whole block must stay guarded.
     from parapetai_agent.maf import DEFAULT_ALTER_TRANSFORMS as DEFAULT_ALTER_TRANSFORMS
-    from parapetai_agent.maf import GovernanceDenied as GovernanceDenied
     from parapetai_agent.maf import GovernedAgent as GovernedAgent
     from parapetai_agent.maf import build_middleware as build_middleware
     from parapetai_agent.maf import configure_otel as configure_otel
@@ -94,7 +96,6 @@ try:
 
     __all__ += [
         "DEFAULT_ALTER_TRANSFORMS",
-        "GovernanceDenied",
         "GovernedAgent",
         "build_middleware",
         "configure_otel",

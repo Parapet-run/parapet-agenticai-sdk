@@ -226,6 +226,7 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, Status, StatusCod
 
 import parapetai_agent.policy as parapetai_agent_policy
 from parapetai_agent import pep_identity
+from parapetai_agent._exceptions import GovernanceDenied
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.control_plane import (
     default_pep_id,
@@ -356,17 +357,11 @@ _current_chat: contextvars.ContextVar[_ChatCorrelation | None] = contextvars.Con
 
 _PREVIEW_CHARS = 2000
 
-
-class GovernanceDenied(Exception):
-    """Raised by ParapetChatMiddleware on a Cedar deny -- verified to
-    propagate correctly (see module docstring). NOT raised by
-    ParapetFunctionMiddleware: verified that doing so is silently swallowed
-    by MAF's own function-invocation error handling, so that hook uses
-    result-substitution instead."""
-
-    def __init__(self, decision: Decision) -> None:
-        self.decision = decision
-        super().__init__(f"Blocked by governance policy: {decision.reason}")
+# GovernanceDenied is defined at base level (parapetai_agent._exceptions) and
+# imported above, so a denial is ONE catchable type across both this MAF adapter
+# and the framework-neutral govern() facade, and is importable with no
+# agent_framework dependency. `from parapetai_agent.maf import GovernanceDenied`
+# still works via that import.
 
 
 @dataclass(slots=True, frozen=True)
