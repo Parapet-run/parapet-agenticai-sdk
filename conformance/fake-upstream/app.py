@@ -191,4 +191,4 @@ async def _stream_chunks(model: str, tool_name: str | None) -> AsyncIterator[str
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=9001)  # noqa: S104 -- test fixture, container-local only
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "9001")))  # noqa: S104 -- test fixture, container-local only
