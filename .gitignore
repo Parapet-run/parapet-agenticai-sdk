@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+# Envs
+.venv/
+venv/
+.env
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+# Lockfile (this is a library, not an app)
+uv.lock
+# PEP identity / secrets — never commit
+.parapetai/
+*.key
+# OS
+.DS_Store
+
+# Stale backups from extraction — never commit
+_to_delete/
+*.bak
