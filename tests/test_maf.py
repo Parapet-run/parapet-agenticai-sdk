@@ -55,6 +55,7 @@ from agent_framework.gemini import GeminiChatClient
 from agent_framework.openai import OpenAIChatCompletionClient
 from azure.identity import AzureCliCredential
 from httpx import Response
+
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.maf import (
     GovernedAgent,
@@ -1406,7 +1407,6 @@ class TestOtelCorrelation:
            enduser.id/user.roles semantic-convention attributes
            specifically, not just buried in a nested dict.
         """
-        import parapetai_agent.maf as maf_module
         from opentelemetry import trace as otel_trace
         from opentelemetry.sdk._logs import LoggerProvider
         from opentelemetry.sdk._logs.export import (
@@ -1418,6 +1418,8 @@ class TestOtelCorrelation:
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
             InMemorySpanExporter,
         )
+
+        import parapetai_agent.maf as maf_module
 
         span_exporter = InMemorySpanExporter()
         tracer_provider = TracerProvider()
@@ -1520,13 +1522,14 @@ class TestOtelOpenInferenceAttributes:
         exporter -- every later test's spans would keep flowing to the
         first test's now-orphaned provider instead. Clearing the cache
         here forces a fresh resolution against the provider just set."""
-        import parapetai_agent.maf as maf_module
         from opentelemetry import trace as otel_trace
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
             InMemorySpanExporter,
         )
+
+        import parapetai_agent.maf as maf_module
 
         span_exporter = InMemorySpanExporter()
         tracer_provider = TracerProvider()

@@ -1,5 +1,7 @@
 # parapet-agenticai-sdk
 
+[![CI](https://github.com/Parapet-run/parapet-agenticai-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Parapet-run/parapet-agenticai-sdk/actions/workflows/ci.yml)
+
 **In-process runtime governance for AI agents.** Wrap the agent you already
 have, and every model call and tool call becomes a [Cedar](https://www.cedarpolicy.com/)
 policy decision — **default-deny, fail-closed, content-free audit** — enforced
@@ -168,9 +170,11 @@ docs/                 # API + observability + architecture references
 
 ## Docs
 
+- [Architecture](docs/ARCHITECTURE.md) — stages, fail-closed, the trust boundary
 - [Control-plane API](docs/CONTROL_PLANE_API.md) — the HTTP protocol the SDK speaks
 - [Observability / OTel](docs/OBSERVABILITY.md) — decisions as content-free spans
-- [Architecture](docs/ARCHITECTURE.md) — stages, fail-closed, the trust boundary
+- [Groundedness / HHEM](docs/GROUNDEDNESS_HHEM.md) — the output-faithfulness backends
+- [Examples](examples/) — a runnable authorization demo (base install, no model)
 - [Contributing](CONTRIBUTING.md)
 
 ## Links

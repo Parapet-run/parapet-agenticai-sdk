@@ -86,7 +86,7 @@ def _remote_predictor(url: str) -> Predictor:
 
     def predict(pairs: list[tuple[str, str]]) -> list[float]:
         body = _json.dumps({"pairs": [[p, h] for (p, h) in pairs]}).encode()
-        req = _request.Request(
+        req = _request.Request(  # noqa: S310 -- operator-set in-VPC URL
             f"{url}/score", data=body, headers={"Content-Type": "application/json"}
         )
         with _request.urlopen(req, timeout=30) as resp:  # noqa: S310 -- operator-set in-VPC URL

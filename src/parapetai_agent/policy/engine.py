@@ -498,7 +498,7 @@ def _split_policies_by_stage(
     def _variant(keep: Any) -> tuple[str, dict[str, dict[str, str]]]:
         survivors = [
             (stmt, obj.get("annotations", {}))
-            for stmt, obj in zip(statements, ordered)
+            for stmt, obj in zip(statements, ordered, strict=True)
             if keep(obj.get("annotations", {}))
         ]
         text = "\n".join(stmt for stmt, _ in survivors)

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import respx
 from httpx import Response
+
 from parapetai_agent.control_plane import (
     BundleFetchError,
     default_pep_id,

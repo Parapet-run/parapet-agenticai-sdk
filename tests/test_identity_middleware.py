@@ -13,9 +13,6 @@ from __future__ import annotations
 import base64
 import json
 
-from parapetai_agent.identity_middleware import IdentityMiddleware, jwt_bearer_extractor
-from parapetai_agent.identity_store import IdentityKeyKind, get_identity, set_identity
-from parapetai_agent.maf import _identity_claims, _identity_roles
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -23,6 +20,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
+
+from parapetai_agent.identity_middleware import IdentityMiddleware, jwt_bearer_extractor
+from parapetai_agent.identity_store import IdentityKeyKind, get_identity, set_identity
+from parapetai_agent.maf import _identity_claims, _identity_roles
 
 
 async def _observed(request: Request) -> JSONResponse:

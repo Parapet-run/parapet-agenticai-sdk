@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+
 from parapetai_agent.identity_store import InMemoryIdentityStore, configure_identity_store
 
 

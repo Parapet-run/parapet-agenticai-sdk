@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from parapetai_agent import response_judge as rj
 
 

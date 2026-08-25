@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from parapetai_agent.groundedness import GroundednessConfig, score_groundedness
 
 SOURCE = (

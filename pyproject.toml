@@ -82,3 +82,34 @@ include = ["src/parapetai_agent", "tests", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+# agent_framework is optional (the `maf` extra) -- not installed in the base
+# dev/CI env, so no stubs. Only parapetai_agent/maf.py imports it.
+[[tool.mypy.overrides]]
+module = "agent_framework.*"
+ignore_missing_imports = true
+
+# opentelemetry-sdk / azure monitor exporter back configure_otel() -- optional
+# (`maf` extra), imported lazily.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.*", "azure.monitor.opentelemetry.exporter.*"]
+ignore_missing_imports = true
+
+# transformers/torch back the OPTIONAL HHEM groundedness backend (_hhem.py) --
+# imported lazily only when a bundle selects that backend.
+[[tool.mypy.overrides]]
+module = ["transformers.*", "torch.*"]
+ignore_missing_imports = true

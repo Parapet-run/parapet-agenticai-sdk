@@ -22,6 +22,7 @@ import respx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx import Response
+
 from parapetai_agent import pep_identity
 from parapetai_agent.control_plane import (
     ensure_pep_identity,

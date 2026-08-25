@@ -10,6 +10,7 @@ That's exactly the contract groundedness.py's 'hhem' backend depends on.
 from __future__ import annotations
 
 import pytest
+
 from parapetai_agent import _hhem
 
 
