@@ -232,3 +232,49 @@ class TestLangGraph:
         except GovernanceDenied:
             pass
         assert ran["execute_shell"] is False  # the destructive body never ran
+
+
+# --------------------------------------------------------------------------- #
+# CrewAI -- @gov.tool under CrewAI's @tool. kickoff() is synchronous, so these
+# are plain (non-async) tests.
+# --------------------------------------------------------------------------- #
+class TestCrewAI:
+    @staticmethod
+    def _crew(governed_fn: object, task_desc: str) -> object:
+        from crewai import LLM, Agent, Crew, Task
+        from crewai.tools import tool as crew_tool
+
+        llm = LLM(model="openai/fake-model", base_url=f"{FAKE_URL}/v1", api_key="test-key")
+        tool = crew_tool(governed_fn.__name__)(governed_fn)
+        agent = Agent(
+            role="assistant",
+            goal="Use the available tool.",
+            backstory="A test agent.",
+            tools=[tool],
+            llm=llm,
+            verbose=False,
+        )
+        task = Task(description=task_desc, expected_output="done", agent=agent)
+        return Crew(agents=[agent], tasks=[task], verbose=False)
+
+    @staticmethod
+    def _quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+        monkeypatch.setenv("CREWAI_TELEMETRY_OPT_OUT", "true")
+
+    def test_allowed_tool_runs(self, fake_model: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("crewai")
+        self._quiet(monkeypatch)
+        _gov, ran, lookup_order, _ = _governed_tools()
+        self._crew(lookup_order, "Look up order 12345.").kickoff()
+        assert ran["lookup_order"] is True
+
+    def test_denied_tool_is_blocked(self, fake_model: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("crewai")
+        self._quiet(monkeypatch)
+        _gov, ran, _, execute_shell = _governed_tools()
+        try:  # CrewAI may capture the tool error or propagate it; either way
+            self._crew(execute_shell, "Run a shell command.").kickoff()
+        except GovernanceDenied:
+            pass
+        assert ran["execute_shell"] is False  # the destructive body never ran

@@ -1,0 +1,39 @@
+name: release
+
+# Publish to PyPI when a version tag is pushed, e.g.:
+#   git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi                 # optional: add a protection rule in repo settings
+    permissions:
+      id-token: write                 # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Check the tag matches the package version
+        run: |
+          pkg=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package=$pkg tag=$tag"
+          test "$pkg" = "$tag" || { echo "::error::tag v$tag != pyproject version $pkg"; exit 1; }
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No token needed: uses OIDC Trusted Publishing.
+        # One-time setup on PyPI -> parapetai-agent -> Publishing:
+        #   Add a trusted publisher:
+        #     Owner:       Parapet-run
+        #     Repository:  parapet-agenticai-sdk
+        #     Workflow:    release.yml
+        #     Environment: pypi

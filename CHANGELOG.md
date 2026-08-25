@@ -4,7 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.1.1] - Unreleased
+## [0.2.0]
+
+Framework-neutral governance and cross-framework conformance.
+
+### Added
+- `Governor` — a framework-neutral `govern()` facade (`from_policy_dir`,
+  `check_input` / `authorize_tool` / `check_output`, and a `@gov.tool`
+  decorator) so any Python agent framework can enforce policy without a
+  dedicated adapter. Built on the same `GovernanceHook` / `PolicyEngine` core as
+  the Microsoft Agent Framework adapter.
+- Cross-framework conformance suite proving the block happens end-to-end in the
+  real runtime of the Microsoft Agent Framework, OpenAI Agents SDK, LangGraph,
+  and CrewAI (`tests/test_conformance_frameworks.py`).
+
+### Changed
+- `GovernanceDenied` now lives in `parapetai_agent._exceptions` and is exported
+  from the top-level package, so it can be caught without importing any
+  framework-specific module. The Microsoft Agent Framework adapter re-exports the
+  same class (import site unchanged).
+
+## [0.1.1]
 
 Initial public release of the open-source Parapet agentic-AI SDK, extracted from
 the Parapet platform into its own repository.
