@@ -79,3 +79,6 @@ packages = ["src/parapetai_agent"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/parapetai_agent", "tests", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

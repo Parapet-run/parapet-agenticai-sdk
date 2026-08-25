@@ -169,9 +169,30 @@ class TestGroundednessEnforcement:
         from agent_framework import ChatContext, ChatResponse, Message
         from agent_framework.openai import OpenAIChatCompletionClient
 
+        # The groundedness SOURCE is the result of THIS turn's READ tool call --
+        # what maf.py:_grounding_source extracts, not the user prompt (grounding
+        # an answer against the user's own prompt would be circular). It is
+        # duck-typed to the FunctionResultContent contract _grounding_source
+        # reads (.result / .name / .call_id); "lookup_policy" is a read tool
+        # (see maf.py:_READ_TOOL_HINTS), so its result is used as the source.
+        class _ReadToolResult:
+            def __init__(self, result: str) -> None:
+                self.result = result
+                self.name = "lookup_policy"
+                self.call_id = "call-1"
+
+        class _ToolMessage:
+            def __init__(self, contents: list) -> None:
+                self.role = "tool"
+                self.text = ""
+                self.contents = contents
+
         ctx = ChatContext(
             client=OpenAIChatCompletionClient(),
-            messages=[Message("user", [SOURCE])],  # the source the answer must be grounded in
+            messages=[
+                Message("user", ["What is the refund policy?"]),
+                _ToolMessage([_ReadToolResult(SOURCE)]),
+            ],
             options={"model": "gpt-4o-mini", "tools": []},
         )
 

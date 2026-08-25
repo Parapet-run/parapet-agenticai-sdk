@@ -75,7 +75,7 @@ from parapetai_agent.maf import (
 )
 from parapetai_agent.policy.engine import PolicyEngine
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 POLICIES = REPO_ROOT / "policies"
 
@@ -941,6 +941,7 @@ def fake_upstream() -> None:
         [
             shutil.which("uv"),
             "run",
+            "--no-project",
             "--with",
             "fastapi",
             "--with",
@@ -957,6 +958,9 @@ def fake_upstream() -> None:
             break
         except httpx.HTTPError:
             time.sleep(0.5)
+    else:
+        proc.terminate()
+        pytest.skip("fake upstream did not start (uv or network unavailable)")
     yield
     proc.terminate()
     proc.wait(timeout=5)
@@ -973,6 +977,7 @@ def mcp_server() -> None:
         [
             shutil.which("uv"),
             "run",
+            "--no-project",
             "--with",
             "mcp==1.29.0",
             "python3",
@@ -987,6 +992,9 @@ def mcp_server() -> None:
             break
         except httpx.HTTPError:
             time.sleep(0.5)
+    else:
+        proc.terminate()
+        pytest.skip("mcp server did not start (uv or network unavailable)")
     yield
     proc.terminate()
     proc.wait(timeout=5)
@@ -1006,6 +1014,7 @@ def mcp_websocket_server() -> None:
         [
             shutil.which("uv"),
             "run",
+            "--no-project",
             "--with",
             "mcp==1.29.0",
             "--with",
@@ -1024,6 +1033,9 @@ def mcp_websocket_server() -> None:
             break
         except httpx.HTTPError:
             time.sleep(0.5)
+    else:
+        proc.terminate()
+        pytest.skip("mcp websocket server did not start (harness unavailable)")
     yield
     proc.terminate()
     proc.wait(timeout=5)
@@ -1194,7 +1206,7 @@ class TestToolSourcesLiveEndToEnd:
     async def test_mcp_stdio_tool_allowed(self, fake_upstream: None) -> None:
         from agent_framework import MCPStdioTool
 
-        stdio_server = str(REPO_ROOT / "spike" / "maf_mcp_check" / "stdio_server.py")
+        stdio_server = str(REPO_ROOT / "conformance" / "mcp-probe" / "stdio_server.py")
         chat_mw, func_mw = build_middleware(
             POLICIES, POLICIES / "entities.json", "mcp-stdio-allow-test"
         )
@@ -1202,7 +1214,7 @@ class TestToolSourcesLiveEndToEnd:
             MCPStdioTool(
                 name="probe-stdio",
                 command=shutil.which("uv"),
-                args=["run", "--with", "mcp==1.29.0", "python3", stdio_server],
+                args=["run", "--no-project", "--with", "mcp==1.29.0", "python3", stdio_server],
             ) as mcp_tool,
             Agent(
                 client=OpenAIChatCompletionClient(),
@@ -1222,14 +1234,14 @@ class TestToolSourcesLiveEndToEnd:
         transport, not just the allow path."""
         from agent_framework import MCPStdioTool
 
-        stdio_server = str(REPO_ROOT / "spike" / "maf_mcp_check" / "stdio_server.py")
+        stdio_server = str(REPO_ROOT / "conformance" / "mcp-probe" / "stdio_server.py")
         engine, caller = _engine_and_caller()
         func_mw = ParapetFunctionMiddleware(engine, caller)
 
         async with MCPStdioTool(
             name="probe-stdio",
             command=shutil.which("uv"),
-            args=["run", "--with", "mcp==1.29.0", "python3", stdio_server],
+            args=["run", "--no-project", "--with", "mcp==1.29.0", "python3", stdio_server],
         ) as mcp_tool:
             execute_shell = next(f for f in mcp_tool.functions if f.name == "execute_shell")
             ctx = FunctionInvocationContext(

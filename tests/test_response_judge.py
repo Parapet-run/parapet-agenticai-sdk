@@ -107,14 +107,16 @@ def test_defaults_to_the_agents_own_model(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("OPENAI_CHAT_COMPLETION_MODEL", "gpt-4o-mini")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://agent-model:8000/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-agent")
-    model, base_url, key = rj._resolve_endpoint({})
-    assert model == "gpt-4o-mini" and base_url == "http://agent-model:8000/v1" and key == "sk-agent"
+    client, model = rj._build_judge_client({})
+    assert model == "gpt-4o-mini"
+    assert "agent-model:8000" in str(client.base_url)
 
     # a dedicated judge endpoint overrides the agent's model when set
     monkeypatch.setenv(rj._ENV_MODEL, "qwen2.5:1.5b")
     monkeypatch.setenv(rj._ENV_BASE_URL, "http://judge-sidecar:11434/v1")
-    model, base_url, _ = rj._resolve_endpoint({})
-    assert model == "qwen2.5:1.5b" and base_url == "http://judge-sidecar:11434/v1"
+    client, model = rj._build_judge_client({})
+    assert model == "qwen2.5:1.5b"
+    assert "judge-sidecar:11434" in str(client.base_url)
 
 
 class TestJudgeEnforcement:
