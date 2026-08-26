@@ -19,7 +19,10 @@ test-gateway:
 	uv run --package parapetai-gateway --extra dev pytest gateway/tests -q
 
 lint:
-	uv run --extra dev ruff check src tests gateway/src gateway/tests
+	# examples/ included deliberately: they arrived here unlinted from the
+	# control-plane repo with stale cross-repo paths, and unlinted example
+	# code is how that happens. They are what a customer copies first.
+	uv run --extra dev ruff check src tests gateway/src gateway/tests examples
 	uv run --extra dev ruff format --check src gateway/src
 
 typecheck:
