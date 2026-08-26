@@ -40,6 +40,12 @@ OTel export.
 
 # Framework examples
 
+## `same_prompt_every_framework/` — start here
+
+Five frameworks, one Cedar rule, the same two prompts, side by side. The line
+you write differs per framework; the decision does not. It is the fastest way
+to see both what integration costs you and what it buys.
+
 Each subfolder is self-contained: its own `README.md`, its own
 `.env.example`/`.env` (copy one, don't share), its own `run_example.py`, and --
 when using a control plane -- its own separately-provisioned
