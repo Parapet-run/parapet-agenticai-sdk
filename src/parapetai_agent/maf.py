@@ -1249,8 +1249,20 @@ def _token_count_attributes(usage: Mapping[str, Any] | None) -> dict[str, int]:
 # Name fragments that mark a tool as READ/retrieval. Only results from tools
 # that match are usable as a groundedness SOURCE (see _grounding_source).
 _READ_TOOL_HINTS = (
-    "lookup", "get", "search", "find", "list", "fetch", "retrieve",
-    "read", "query", "describe", "show", "view", "load", "select",
+    "lookup",
+    "get",
+    "search",
+    "find",
+    "list",
+    "fetch",
+    "retrieve",
+    "read",
+    "query",
+    "describe",
+    "show",
+    "view",
+    "load",
+    "select",
 )
 
 

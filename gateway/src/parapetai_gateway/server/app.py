@@ -25,10 +25,10 @@ import httpx
 import structlog
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+
 from parapetai_agent.identity import Caller, resolve_from_path
 from parapetai_agent.policy.engine import Decision, PolicyEngine
 from parapetai_agent.providers.parsers import parse_request
-
 from parapetai_gateway.config import settings
 from parapetai_gateway.fingerprint import fingerprint
 

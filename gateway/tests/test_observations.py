@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_gateway.server.app import create_app
+
+from parapetai_agent.policy.engine import PolicyEngine
 
 POLICIES = Path(__file__).resolve().parents[2] / "policies"
 

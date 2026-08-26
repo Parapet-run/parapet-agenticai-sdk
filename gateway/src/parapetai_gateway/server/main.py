@@ -11,11 +11,11 @@ from importlib.metadata import PackageNotFoundError, version
 
 import structlog
 import uvicorn
+from watchfiles import watch
+
 from parapetai_agent import pep_identity
 from parapetai_agent.control_plane import ensure_pep_identity, poll_once, run_bundle_poller
 from parapetai_agent.policy.engine import PolicyEngine
-from watchfiles import watch
-
 from parapetai_gateway.config import settings
 from parapetai_gateway.server.app import create_app
 

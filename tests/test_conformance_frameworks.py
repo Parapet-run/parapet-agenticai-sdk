@@ -269,7 +269,9 @@ class TestCrewAI:
         self._crew(lookup_order, "Look up order 12345.").kickoff()
         assert ran["lookup_order"] is True
 
-    def test_denied_tool_is_blocked(self, fake_model: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_denied_tool_is_blocked(
+        self, fake_model: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         pytest.importorskip("crewai")
         self._quiet(monkeypatch)
         _gov, ran, _, execute_shell = _governed_tools()

@@ -20,8 +20,9 @@ from pathlib import Path
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_gateway.server.app import create_app
+
+from parapetai_agent.policy.engine import PolicyEngine
 
 _MCP_BODY = {
     "jsonrpc": "2.0",
