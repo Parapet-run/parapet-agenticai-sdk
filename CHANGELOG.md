@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0]
 
 ### Added
 - `Governor.from_control_plane()` — the framework-neutral embed path can now
@@ -26,11 +26,23 @@ All notable changes to this project are documented here. The format is based on
   this routes Anthropic, Bedrock, Vertex, Groq, Ollama and the rest through one
   code path rather than a vendor client per provider.
 
+- **The gateway PEP now ships from this repo** (`gateway/`), MIT-licensed and
+  publishable, with a console script: `uvx parapetai-gateway`. It is the same
+  enforcement role as this package in a different form factor — for apps that
+  cannot embed the SDK, and for agents that aren't Python at all. `parapetai-mcp`
+  and the conformance suite moved here too. The repo is now a uv workspace; the
+  root remains the published `parapetai-agent` package, so `pip install
+  parapetai-agent` is unchanged.
+
 ### Changed
 - Control-plane bootstrap (identity registration, first fetch, disk-vs-memory
   policy load, heartbeat, poller thread) extracted to
   `control_plane.bootstrap_engine()` and shared by both embed paths. Two copies
   meant two sets of outage semantics.
+- This repo is now the single source of truth for the Cedar engine. A second
+  copy lived in the private platform repo and had re-diverged ~200 lines within
+  a day of being reconciled; two engines means the control plane can author
+  policy the enforcing SDK cannot execute.
 
 ### Fixed
 - The heartbeat `version` field reported the **gateway's** package version

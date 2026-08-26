@@ -18,8 +18,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Build sdist + wheel
-        run: uv build
+      # --package is load-bearing. This repo is now a uv workspace, and a bare
+      # `uv build` builds EVERY member -- parapetai-gateway and parapetai-mcp
+      # would land in dist/ and the publish step below uploads dist/*, so a
+      # single tag would push three packages to PyPI while the version check
+      # only validates the root one. Build exactly the package this tag names.
+      - name: Build sdist + wheel (parapetai-agent only)
+        run: uv build --package parapetai-agent --out-dir dist
 
       - name: Check the tag matches the package version
         run: |
