@@ -109,6 +109,23 @@ mw = build_middleware(
 agent = SomeFrameworkAgent(..., middleware=[mw])
 ```
 
+## Can't change the app? Use the gateway
+
+The SDK and the [gateway](gateway/) are the **same enforcement role in two
+form factors** — both evaluate the same Cedar engine locally, in-process.
+Embed the SDK when you can modify the agent; run the gateway when you can't,
+or when the agent isn't Python at all.
+
+```bash
+uvx parapetai-gateway                                    # or run the container
+export OPENAI_BASE_URL=http://localhost:8080/a/<agent-id>/v1   # in the app
+```
+
+That is the whole integration — no code change, and it works for a Node, Go,
+or Java agent that could never `pip install` anything. They live in one repo
+deliberately: the gateway imports this package's engine, parsers, and identity,
+so splitting them is how the engine forks.
+
 ## Identity
 
 Decisions are made about a **caller**, not just an agent. Bind one:
@@ -209,6 +226,8 @@ src/parapetai_agent/
   signing.py          # the exact bytes a PEP and control plane sign/verify
   control_plane.py    # PEP -> control-plane HTTP client (bundle pull, heartbeat, key register)
   otel/               # OpenInference span conventions
+gateway/              # the PROXY PEP -- same Cedar engine, for apps that can't embed
+mcp-server/           # parapetai-mcp: MCP server + SKILL.md for Claude Code
 tests/                # pytest suite
 conformance/          # per-framework proof the block happens in the real runtime
 policies/             # Cedar sources used as engine fixtures

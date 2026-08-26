@@ -1,0 +1,42 @@
+[project]
+name = "parapetai-mcp"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships with a packaged SKILL.md."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Parapet" }]
+keywords = ["mcp", "agent", "governance", "cedar", "claude-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    # Same pin as parapetai-agent's `maf` extra -- both ultimately talk the
+    # same official MCP SDK; keeping the pin identical avoids two
+    # independently-drifting version ranges for one dependency in this repo.
+    "mcp>=1.24,<2.0",
+    "httpx>=0.28,<1.0",
+]
+
+[project.scripts]
+parapetai-mcp = "parapetai_mcp.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff", "mypy"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/parapetai_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/parapetai_mcp/skills/SKILL.md" = "parapetai_mcp/skills/SKILL.md"

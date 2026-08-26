@@ -83,6 +83,18 @@ dev = [
     "opentelemetry-sdk>=1.20,<2.0",
 ]
 
+# This repo is BOTH the parapetai-agent package (above) and a uv workspace
+# root. The two enforcement points ship from here together: the in-process
+# SDK, and the gateway PEP that evaluates the same Cedar engine for apps that
+# can't embed. Keeping them in one repo is what stops the engine forking --
+# it forked once already across two repos, and the copies drifted ~200 lines
+# apart within a day.
+#
+# The root stays the published package; members are NOT restructured into it,
+# so `pip install parapetai-agent` is unchanged.
+[tool.uv.workspace]
+members = ["gateway", "mcp-server"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
