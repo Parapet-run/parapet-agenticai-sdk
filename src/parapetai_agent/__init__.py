@@ -83,7 +83,7 @@ non-identical, ChatResponse-shaped default) -- import it from
 
 from __future__ import annotations
 
-from parapetai_agent.govern import GovernanceDenied, Governor
+from parapetai_agent.govern import GovernanceDenied, GovernanceReviewRequired, Governor
 from parapetai_agent.identity_store import (
     IdentityKeyKind,
     IdentityStore,
@@ -99,6 +99,7 @@ from parapetai_agent.token_identity import identity_from_claims
 __all__ = [
     # Framework-neutral entry point -- works with no framework at all.
     "GovernanceDenied",
+    "GovernanceReviewRequired",
     "Governor",
     "IdentityKeyKind",
     "IdentityStore",

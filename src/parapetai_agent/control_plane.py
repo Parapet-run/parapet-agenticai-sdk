@@ -22,11 +22,12 @@ hand-edited local file the poller never touched.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -325,6 +326,186 @@ def send_heartbeat(
     except httpx.HTTPError as exc:
         log.error("heartbeat_failed", error=str(exc))
         return None
+
+
+def review_fingerprint(
+    *,
+    agent_id: str,
+    action: str,
+    tool_name: str | None = None,
+    args: Mapping[str, Any] | None = None,
+) -> str:
+    """Identify one exact call, stably, for an approval to be bound to.
+
+    This is what makes an approval single-use and non-transferable: the same
+    string is computed when the review is raised and again when the grant is
+    collected, and the control plane refuses a mismatch. A human approving
+    "close INC-42" therefore cannot have that grant replayed onto INC-43.
+
+    Stable across processes and retries -- `sort_keys` so dict ordering cannot
+    change the digest, `default=str` so an argument that is not JSON-native
+    still hashes to something deterministic rather than raising on the deny
+    path. It is a correlation key, not a secret: it commits to the call, and
+    the authorisation comes from the (unguessable) review_id plus the agent's
+    own authenticated identity.
+    """
+    payload = json.dumps(
+        {
+            "agent_id": agent_id,
+            "action": action,
+            "tool_name": tool_name,
+            "args": args or {},
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def submit_review(
+    control_plane_url: str,
+    agent_secret: str,
+    *,
+    fingerprint: str,
+    tool_name: str | None = None,
+    action: str | None = None,
+    policy_id: str | None = None,
+    reason: str | None = None,
+    risk_score: str | None = None,
+    args_preview: str | None = None,
+    pep_id: str | None = None,
+    private_key: Ed25519PrivateKey | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Escalate a locally-denied call to a human. Returns the review body
+    (with `review_id`) or None if the control plane could not be reached.
+
+    None is not a failure that needs handling specially: the call has ALREADY
+    been denied locally by Cedar, and stays denied. An unreachable control
+    plane means no human can be asked, never that the call proceeds -- which
+    is the property that keeps the control plane off the decision path.
+    """
+    path = "/api/v1/reviews"
+    body = {
+        "fingerprint": fingerprint,
+        "tool_name": tool_name,
+        "action": action,
+        "policy_id": policy_id,
+        "reason": reason,
+        "risk_score": risk_score,
+        "args_preview": args_preview,
+        "pep_id": pep_id,
+    }
+    return _post_review(control_plane_url, agent_secret, path, body, private_key, timeout)
+
+
+def collect_review(
+    control_plane_url: str,
+    agent_secret: str,
+    *,
+    review_id: str,
+    fingerprint: str,
+    private_key: Ed25519PrivateKey | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Poll a review and collect the grant if one has been approved.
+
+    `allowed` in the returned body is true only for a grant THIS call
+    collected -- the control plane consumes it atomically, so polling is safe
+    to repeat but a grant is handed out exactly once. Returns None when the
+    control plane is unreachable, which a caller must treat as "not approved".
+    """
+    path = f"/api/v1/reviews/{review_id}/collect"
+    return _post_review(
+        control_plane_url, agent_secret, path, {"fingerprint": fingerprint}, private_key, timeout
+    )
+
+
+def _post_review(
+    control_plane_url: str,
+    agent_secret: str,
+    path: str,
+    body: dict[str, Any],
+    private_key: Ed25519PrivateKey | None,
+    timeout: float,
+) -> dict[str, Any] | None:
+    # Same serialize-once discipline as send_heartbeat: the signed bytes and
+    # the sent bytes must be the same bytes, so `content=` rather than `json=`.
+    body_bytes = json.dumps(body).encode()
+    headers = {"Authorization": f"Bearer {agent_secret}", "Content-Type": "application/json"}
+    if private_key is not None:
+        headers.update(pep_identity.sign_headers(private_key, "POST", path, body_bytes))
+    try:
+        response = httpx.post(
+            f"{control_plane_url.rstrip('/')}{path}",
+            headers=headers,
+            content=body_bytes,
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        log.error("review_request_failed", path=path, error=str(exc))
+        return None
+    if response.status_code != 200:
+        # Includes 409 (fingerprint mismatch, already consumed, not approved)
+        # and 404 (unknown review). All of them mean "no grant", which is the
+        # same outcome as an unreachable control plane: the local deny stands.
+        log.warning(
+            "review_request_refused",
+            path=path,
+            status_code=response.status_code,
+            body=response.text[:200],
+        )
+        return None
+    result: dict[str, Any] = response.json()
+    return result
+
+
+@dataclass
+class ReviewClient:
+    """A PEP's connection to the approvals queue.
+
+    Binds the connection details (url, secret, signing key, identity) once so
+    the decision path does not have to thread five parameters through every
+    call. The module-level `submit_review`/`collect_review` remain the protocol
+    -- this only supplies their arguments, the same split as `httpx.Client`
+    over `httpx.post`.
+
+    Every method is best-effort and returns None rather than raising: a held
+    call has ALREADY been denied locally, so a control plane that cannot be
+    reached costs an approval, never an enforcement.
+    """
+
+    control_plane_url: str
+    agent_secret: str
+    agent_id: str
+    private_key: Ed25519PrivateKey | None = None
+    pep_id: str | None = None
+
+    def fingerprint(
+        self, *, action: str, tool_name: str | None = None, args: Mapping[str, Any] | None = None
+    ) -> str:
+        return review_fingerprint(
+            agent_id=self.agent_id, action=action, tool_name=tool_name, args=args
+        )
+
+    def submit(self, *, fingerprint: str, **detail: Any) -> dict[str, Any] | None:
+        return submit_review(
+            self.control_plane_url,
+            self.agent_secret,
+            fingerprint=fingerprint,
+            pep_id=self.pep_id,
+            private_key=self.private_key,
+            **detail,
+        )
+
+    def collect(self, *, review_id: str, fingerprint: str) -> dict[str, Any] | None:
+        return collect_review(
+            self.control_plane_url,
+            self.agent_secret,
+            review_id=review_id,
+            fingerprint=fingerprint,
+            private_key=self.private_key,
+        )
 
 
 def run_bundle_poller(
