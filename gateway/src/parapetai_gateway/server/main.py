@@ -14,7 +14,12 @@ import uvicorn
 from watchfiles import watch
 
 from parapetai_agent import pep_identity
-from parapetai_agent.control_plane import ensure_pep_identity, poll_once, run_bundle_poller
+from parapetai_agent.control_plane import (
+    ReviewClient,
+    ensure_pep_identity,
+    poll_once,
+    run_bundle_poller,
+)
 from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_gateway.config import settings
 from parapetai_gateway.server.app import create_app
@@ -121,9 +126,24 @@ def main() -> None:
             interval_s=settings.bundle_poll_interval_s,
         )
 
+    # A held call can only be escalated where there is a queue to escalate to.
+    # None without a control plane, which keeps the no-control-plane gateway
+    # behaving exactly as it did before approvals existed.
+    reviews = (
+        ReviewClient(
+            control_plane_url=args.control_plane_url,
+            agent_secret=args.agent_secret,
+            agent_id=args.agent_id,
+            private_key=private_key,
+            pep_id=args.pep_id,
+        )
+        if control_plane_configured
+        else None
+    )
+
     log.info("gateway_starting", mode=settings.mode, port=settings.port, **engine.status)
     uvicorn.run(
-        create_app(engine),
+        create_app(engine, reviews),
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level,

@@ -94,11 +94,28 @@ not content, so the grant is still bound to that exact prompt.
   `review_id`, and queueing anyway would leave rows an operator can see but
   the caller can never resolve. Such a caller opts in with
   `Governor.request_approval()`.
-- **`gateway/` still refuses a review with HTTP 403 and does not queue one.**
-  The proxy PEP cannot hold a client connection for a human any more than the
-  SDK can, so participating needs a resume protocol of its own — return the
-  `review_id` on the 403, accept it on the retry. Deliberately out of scope;
-  ADR 0008's gateway consequences are unchanged.
+- **`gateway/` participates through the same queue, over HTTP.** A proxy has
+  no exception to raise and cannot hold a client connection for a human, so
+  the ticket rides on the 403 (`x-parapetai-review-id`, and in `error.data`
+  for MCP, whose clients never see headers) and the client re-presents it on
+  the retry. Two properties carry it:
+
+  * **Cedar is evaluated first, every time.** Collection is attempted only
+    while the decision is still `review`, so a grant can never unblock a call
+    that policy has since hardened into a plain deny.
+  * **The fingerprint is recomputed from the retried bytes** — the gateway
+    hashes the raw body, because a model call carries its payload there and a
+    fingerprint over `action` alone would be identical for every prompt to the
+    same endpoint. Approving a small request and retrying with a different one
+    fails at the control plane, which compares the two and refuses.
+
+  The client retries, never the gateway: a proxy must not replay a
+  non-idempotent request on the caller's behalf. Streaming is untouched — the
+  decision happens before the upstream call, so a held streaming request is
+  refused before a single chunk (invariant 6).
+
+  `ReviewClient` is synchronous httpx, so both calls go through the threadpool;
+  inline they would block the event loop for every other in-flight request.
 - **Permission is an event, not a state.** The control plane reports `allowed`
   only for the collection that just succeeded. Deriving it from stored status
   was a real bug found by an end-to-end run and not by unit tests: a
