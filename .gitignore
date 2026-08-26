@@ -24,3 +24,6 @@ uv.lock
 # Stale backups from extraction — never commit
 _to_delete/
 *.bak
+# git bundle transfer artifacts. They carry full history, so an accidental
+# `git add -A` in a PUBLIC repo is how private history would leak.
+*.bundle

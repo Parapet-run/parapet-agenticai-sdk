@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `Governor.from_control_plane()` — the framework-neutral embed path can now
+  receive **control-plane-authored** policy, refreshed by a background poller.
+  Previously only the Microsoft Agent Framework adapter could; every other
+  framework was limited to `from_policy_dir()`, i.e. policy files the adopter
+  maintained themselves. On an unreachable control plane it falls back to the
+  last bundle on disk rather than failing to start; with nothing on disk it
+  fails closed.
+- **REVIEW decision outcome** — `@action("review")` on a Cedar `forbid` marks
+  that deny as escalatable to a human, surfacing as `Decision.effect ==
+  "review"`. `Decision.allowed` stays `False`, so any caller that only checks
+  `allowed` blocks a held call exactly as it blocked a denied one. Requires
+  unanimity across determining policies, so a hard `forbid` matching alongside
+  a reviewable one keeps the deny hard. See `docs/adr/0008`.
+- **Provider-agnostic SLM judge** (`litellm` backend, extra:
+  `parapetai-agent[judge]`). The default `slm` backend builds an
+  OpenAI/AzureOpenAI client and cannot reach a non-OpenAI-wire endpoint at all;
+  this routes Anthropic, Bedrock, Vertex, Groq, Ollama and the rest through one
+  code path rather than a vendor client per provider.
+
+### Changed
+- Control-plane bootstrap (identity registration, first fetch, disk-vs-memory
+  policy load, heartbeat, poller thread) extracted to
+  `control_plane.bootstrap_engine()` and shared by both embed paths. Two copies
+  meant two sets of outage semantics.
+
+### Fixed
+- The heartbeat `version` field reported the **gateway's** package version
+  (`parapetai-gateway`) rather than this SDK's — a copy-paste from the
+  gateway's own helper. Since that package is normally absent from an embedded
+  SDK, every SDK PEP reported `0.0.0-dev`. Now reports `parapetai-agent` via
+  `control_plane.sdk_version()`.
+
 ## [0.2.0]
 
 Framework-neutral governance and cross-framework conformance.

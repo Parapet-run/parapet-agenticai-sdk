@@ -24,7 +24,7 @@ Two secrets, provisioned once and never re-shown:
 
 | Credential | Created by | Held by | Used for |
 |---|---|---|---|
-| `agent_id` + `agent_secret` | Control plane, at provisioning (`POST /api/v1/agents`) | The agent (config / env) | Bearer auth on every call; only the secret's *hash* is stored server-side |
+| `agent_id` + `agent_secret` | Issued once by the control plane at provisioning, out of band | The agent (config / env) | Bearer auth on every call; only the secret's *hash* is stored server-side |
 | Ed25519 keypair | The agent, on first run (`pep_identity.load_or_create_keypair`) | Private key never leaves the agent | Signing bundle-pull and heartbeat requests |
 
 The private key is written to `~/.parapetai/pep_ed25519.key` (`0600`), overridable
@@ -34,17 +34,24 @@ process lifetime.
 
 ## Endpoints
 
-### Management API — prefix `/api/v1`
+### Agent API — prefix `/api/v1`
+
+This is the **complete** protocol a PEP speaks. Every endpoint here is
+agent-authenticated: a bearer `agent_secret`, and for the two that matter most,
+an Ed25519 signature as well.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `POST /api/v1/agents` | Operator / admin | Provision an agent. Returns `agent_id` + one-time `secret`. Usually run by a CLI, not the SDK. |
 | `POST /api/v1/keys` | Bearer `agent_secret` | Register this PEP's Ed25519 **public** key. Idempotent; rotation demotes the previous key so in-flight requests still verify. |
 | `GET /api/v1/bundle` | Bearer + **signed** | Pull the agent's current signed policy bundle. Send `If-None-Match: <etag>`; a `304 Not Modified` means keep the cached bundle. |
 | `POST /api/v1/fleet/heartbeat` | Bearer + **signed** | Report liveness + the enforcing policy generation/digest. Response may carry `rotate_key: true`. |
-| `GET /api/v1/fleet` | Dashboard | Fleet listing (control-plane UI). |
-| `POST /api/v1/audit` | Bearer `agent_secret` | Ingest content-free decision records (alternative to / alongside the OTLP path). |
-| `GET /api/v1/audit` | Dashboard | Query recent audit records. |
+| `POST /api/v1/audit` | Bearer + **signed** | Ingest content-free decision records. An alternative to the OTLP path below; this SDK uses OTLP. |
+
+The control plane exposes other routes — provisioning, the operator console,
+tenant and fleet administration. They are **not** part of this protocol, are not
+callable with an agent secret, and are deliberately not documented here: an
+adopter never needs them, and this SDK never calls them. `agent_id` and
+`agent_secret` are issued to you once at provisioning, out of band.
 
 ### OTLP receiver — standard paths
 
@@ -88,7 +95,7 @@ key, within a bounded clock-drift window that limits replay.
 ## Lifecycle (typical)
 
 ```
-provision (operator)         POST /api/v1/agents        -> agent_id + secret
+provision (operator)         out of band                -> agent_id + secret
 first run  (agent)           POST /api/v1/keys          register public key
 steady state (agent loop)
   every N seconds            GET  /api/v1/bundle         (signed)  -> bundle or 304
