@@ -1,0 +1,167 @@
+# Framework conformance matrix.
+#
+# STATUS VALUES
+#   verified   — green conformance test at the pinned version. Only these may
+#                appear in customer-facing docs as "supported".
+#   probable   — env var documented upstream, no test yet.
+#   unknown    — needs investigation. Assume unsupported.
+#   unsupported— no config-only lever exists.
+#
+# Nothing moves to `verified` without a green test. That rule is the product.
+
+frameworks:
+  - id: openai-agents
+    name: OpenAI Agents SDK
+    language: python
+    client: openai-agents
+    observed_client: openai-agents
+    observed_client_version: "0.19.2"
+    env:
+      OPENAI_BASE_URL: "{gateway}/v1"
+      OPENAI_WEBSOCKET_BASE_URL: "{gateway_ws}/v1"
+    status: probable
+    notes: >
+      Official docs state the default provider reads OPENAI_BASE_URL, and
+      OPENAI_WEBSOCKET_BASE_URL for Responses websocket transport. Client is
+      created lazily, so the env var must be set before the first model call.
+      `client` corrected from openai-python to openai-agents 2026-08-03: the
+      SDK stamps its own User-Agent (Agents/Python <ver>) on the AsyncOpenAI
+      client it builds internally -- x-stainless-package-version on that
+      inner client reflects openai's version, not agents', so it is not
+      usable as a version source for this shape (see parapetai_gateway.fingerprint).
+
+  - id: langgraph
+    name: LangGraph / LangChain
+    language: python
+    client: openai-python
+    observed_client: openai-python
+    observed_client_version: "2.52.0"
+    env:
+      OPENAI_API_BASE: "{gateway}/v1"
+      OPENAI_BASE_URL: "{gateway}/v1"
+    status: verified
+    pinned: "langgraph==1.2.10, langchain-openai==1.4.1"
+    notes: >
+      Verified 2026-08-03: create_react_agent + ChatOpenAI with zero
+      gateway-specific code, run manually against a local gateway instance
+      (docker run, host.docker.internal). Routed to POST /v1/chat/completions
+      with declared_tools=['lookup_order'], decision=allow, forwarded to real
+      OpenAI. langchain-openai exposes base_url / openai_api_base — both env
+      vars are set since which one is honoured depends on the integration
+      package version. `client` corrected from langchain-openai to
+      openai-python 2026-08-03: langchain-openai is the integration package a
+      developer installs, but ChatOpenAI wraps openai-python's own client
+      directly, so that is what is actually on the wire and what the gateway's
+      client-fingerprint check (parapetai_gateway.fingerprint) verifies against.
+
+  - id: crewai
+    name: CrewAI
+    language: python
+    client: openai-python
+    observed_client: openai-python
+    observed_client_version: "2.52.0"
+    env:
+      OPENAI_API_BASE: "{gateway}/v1"
+      ANTHROPIC_BASE_URL: "{gateway}"
+      LITELLM_PROXY_API_BASE: "{gateway}/v1"
+    status: verified
+    pinned: "crewai==1.15.10"
+    notes: >
+      Verified 2026-08-03, OpenAI path only: Agent+Task+Crew with zero
+      gateway-specific code, run manually against a local gateway instance.
+      Routed to POST /v1/chat/completions with declared_tools=['lookup_order'],
+      decision=allow, forwarded to real OpenAI. TRAP still applies: CrewAI uses
+      native SDKs for OpenAI/Anthropic/Gemini/Azure/Bedrock and LiteLLM only as
+      fallback. This run does NOT verify the Anthropic/Gemini/Azure/Bedrock
+      paths — OPENAI_API_BASE alone does not cover a crew running on Anthropic.
+      Each provider path needs its own probe before being called verified.
+      `client` corrected from "native-sdks + litellm" (the framework's overall
+      multi-provider architecture) to openai-python 2026-08-03: that's the
+      wire-level truth for this specific, verified OpenAI-native path (see
+      LLM(custom_openai=True) in conformance/frameworks/crewai/probe.py).
+
+  - id: autogen
+    name: AutoGen
+    language: python
+    client: openai-python
+    observed_client: openai-python
+    observed_client_version: "2.52.0"
+    env:
+      OPENAI_BASE_URL: "{gateway}/v1"
+    status: verified
+    pinned: "autogen-agentchat==0.7.5, autogen-ext[openai]==0.7.5"
+    notes: >
+      Verified 2026-08-03: the model client (OpenAIChatCompletionClient) is
+      constructed explicitly in user code, as suspected, but base_url is never
+      passed, so resolution falls through to the underlying openai-python
+      client's own OPENAI_BASE_URL env var read. AssistantAgent + one function
+      tool, run manually against a local gateway instance. Routed to POST
+      /v1/chat/completions with declared_tools=['lookup_order'], decision=
+      allow, forwarded to real OpenAI.
+
+  - id: llamaindex
+    name: LlamaIndex
+    language: python
+    client: openai-python
+    env:
+      OPENAI_API_BASE: "{gateway}/v1"
+    status: unknown
+
+  - id: haystack
+    name: Haystack
+    language: python
+    client: openai-python
+    env:
+      OPENAI_API_BASE: "{gateway}/v1"
+    status: unknown
+    notes: OpenAIGenerator takes api_base_url; env fallback unconfirmed.
+
+  - id: adk
+    name: Google ADK
+    language: python
+    client: google-genai
+    env:
+      GOOGLE_GEMINI_BASE_URL: "{gateway}"
+      GOOGLE_VERTEX_BASE_URL: "{gateway}"
+    status: unknown
+    notes: >
+      These vars work but are undocumented in @google/genai. Vertex mode has a
+      known auth mismatch — GOOGLE_VERTEX_BASE_URL 404s with API-key auth while
+      the Gemini path works. Pin the SDK version and watch for breakage.
+
+  - id: mastra
+    name: Mastra
+    language: typescript
+    client: vercel-ai-sdk
+    env:
+      OPENAI_BASE_URL: "{gateway}/v1"
+      ANTHROPIC_BASE_URL: "{gateway}"
+    status: unknown
+
+  - id: maf
+    name: Microsoft Agent Framework
+    language: python
+    client: azure-openai
+    env:
+      AZURE_OPENAI_ENDPOINT: "{gateway}"
+    status: unknown
+    notes: Azure path shape differs — /openai/deployments/{d}/chat/completions.
+
+  - id: foundry
+    name: Azure AI Foundry
+    language: python
+    client: azure-ai-projects
+    env:
+      AZURE_OPENAI_ENDPOINT: "{gateway}"
+    status: unknown
+
+  - id: dify
+    name: Dify
+    language: n/a
+    client: platform-config
+    env: {}
+    status: unknown
+    notes: >
+      Configured through Dify's model provider admin surface, not env vars.
+      Still config-not-code, but a different integration path — likely a
+      "custom OpenAI-compatible provider" entry pointing at the gateway.

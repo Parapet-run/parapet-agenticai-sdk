@@ -58,9 +58,7 @@ def _load_predictor() -> Predictor:
             "pip install transformers torch (see docs/GROUNDEDNESS_HHEM.md)"
         ) from exc
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_ID, trust_remote_code=True
-    )
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID, trust_remote_code=True)
 
     def predict(pairs: list[tuple[str, str]]) -> list[float]:
         # HHEM-2.1-Open exposes .predict(list[(premise, hypothesis)]) -> a

@@ -38,6 +38,43 @@ and the model's responses never leave the process.
 
 ## Quickstart
 
+### Any framework — `Governor`
+
+Three calls at whatever hook points your framework already has. No adapter, no
+framework dependency — works with LangGraph, CrewAI, the OpenAI Agents SDK, or
+a plain `while` loop:
+
+```python
+from parapetai_agent import Governor, GovernanceDenied
+
+# Policy authored in the control plane, pulled and kept fresh in the background.
+gov = Governor.from_control_plane(
+    "https://control.parapet.example",
+    agent_secret="...",           # issued once at provisioning
+    policy_dir="./policies",      # seed + where the last-known-good bundle lives
+    persist_policy_dir="./policies",
+)
+
+gov.check_input(prompt, roles=["OrderViewer"])   # before the model
+gov.authorize_tool("delete_incident", {...})     # before a tool runs -> may raise
+gov.check_output(answer, sources=[doc])          # after the model
+```
+
+Every decision is evaluated **locally, in-process** — the control plane is
+never on the decision path, so it can be down without blocking a call. When it
+*is* unreachable at startup, the agent falls back to the last bundle on disk
+and keeps enforcing it; with nothing on disk there is no policy to enforce, and
+it fails closed rather than running ungoverned.
+
+For local development or an air-gapped install, use
+`Governor.from_policy_dir("./policies")` instead — same three calls, policy
+from files you manage.
+
+Denials raise `GovernanceDenied`; pass `raise_on_deny=False` to get the
+`Decision` back and branch on it yourself.
+
+### Microsoft Agent Framework — `GovernedAgent`
+
 `GovernedAgent` is a drop-in replacement for `agent_framework.Agent`:
 
 ```python
@@ -71,6 +108,23 @@ mw = build_middleware(
 )
 agent = SomeFrameworkAgent(..., middleware=[mw])
 ```
+
+## Can't change the app? Use the gateway
+
+The SDK and the [gateway](gateway/) are the **same enforcement role in two
+form factors** — both evaluate the same Cedar engine locally, in-process.
+Embed the SDK when you can modify the agent; run the gateway when you can't,
+or when the agent isn't Python at all.
+
+```bash
+uvx parapetai-gateway                                    # or run the container
+export OPENAI_BASE_URL=http://localhost:8080/a/<agent-id>/v1   # in the app
+```
+
+That is the whole integration — no code change, and it works for a Node, Go,
+or Java agent that could never `pip install` anything. They live in one repo
+deliberately: the gateway imports this package's engine, parsers, and identity,
+so splitting them is how the engine forks.
 
 ## Identity
 
@@ -131,6 +185,7 @@ schema: **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)**.
 |---|---|---|
 | `maf` | `agent-framework`, `mcp`, OpenTelemetry SDK + OTLP exporter | Microsoft Agent Framework integration and OTel export |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction |
+| `judge` | `litellm` | The provider-agnostic SLM-judge backend — Anthropic, Bedrock, Vertex, Groq, Ollama. Not needed for the default `slm` backend, which speaks the OpenAI wire. |
 | _(base)_ | `cedarpy`, `httpx`, `cryptography`, `opentelemetry-api` | Cedar engine, control-plane protocol client, Ed25519 PEP identity |
 
 The base install never imports a web framework or an agent framework — a CLI
@@ -148,11 +203,18 @@ These are security properties, not defaults you can tune away:
   policies on failure.
 - **Prompt content is never logged** unless you explicitly opt in. The decision
   audit record is content-free by construction, not by configuration.
+- **A REVIEW is a deny, not a soft allow.** `Decision.allowed` is `False` for
+  `effect == "review"`, so a held call does not execute and any caller that
+  only checks `allowed` blocks it exactly as it blocks a denial. A review needs
+  unanimity: if any determining policy is a plain `forbid`, the deny stays hard.
+  See [ADR 0008](docs/adr/0008-review-decision-outcome.md).
 
 ## Project layout
 
 ```
 src/parapetai_agent/
+  govern.py           # Governor — the framework-neutral entry point (any framework)
+  _exceptions.py      # GovernanceDenied — catchable without importing any framework
   maf.py              # GovernedAgent, build_middleware, configure_otel — the MAF integration
   policy/             # Cedar engine, request/decision shapes, stage split
   content_checks.py   # PII / secrets / injection / profanity scanners (input guardrails)
@@ -164,8 +226,12 @@ src/parapetai_agent/
   signing.py          # the exact bytes a PEP and control plane sign/verify
   control_plane.py    # PEP -> control-plane HTTP client (bundle pull, heartbeat, key register)
   otel/               # OpenInference span conventions
+gateway/              # the PROXY PEP -- same Cedar engine, for apps that can't embed
+mcp-server/           # parapetai-mcp: MCP server + SKILL.md for Claude Code
 tests/                # pytest suite
-docs/                 # API + observability + architecture references
+conformance/          # per-framework proof the block happens in the real runtime
+policies/             # Cedar sources used as engine fixtures
+docs/                 # API + observability + architecture references, plus ADRs
 ```
 
 ## Docs
@@ -174,6 +240,8 @@ docs/                 # API + observability + architecture references
 - [Control-plane API](docs/CONTROL_PLANE_API.md) — the HTTP protocol the SDK speaks
 - [Observability / OTel](docs/OBSERVABILITY.md) — decisions as content-free spans
 - [Groundedness / HHEM](docs/GROUNDEDNESS_HHEM.md) — the output-faithfulness backends
+- [ADR 0006](docs/adr/0006-cedar-policy-stage-and-action-annotations.md) — `@stage` / `@action` policy annotations
+- [ADR 0008](docs/adr/0008-review-decision-outcome.md) — REVIEW as a third decision outcome
 - [Examples](examples/) — a runnable authorization demo (base install, no model)
 - [Contributing](CONTRIBUTING.md)
 

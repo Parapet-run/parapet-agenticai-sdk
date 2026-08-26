@@ -73,9 +73,12 @@ from parapetai_agent.maf import (
     identity_from_bearer_token,
     provider_for_client,
     reset_middleware_registry,
+    track_tool_denials,
 )
 from parapetai_agent.policy.engine import PolicyEngine
 
+# parents[1], not [2]: this repo is <root>/tests/, whereas the platform copy
+# this was ported from sat at <root>/parapetai-agent/tests/ -- one level deeper.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 POLICIES = REPO_ROOT / "policies"
@@ -942,7 +945,6 @@ def fake_upstream() -> None:
         [
             shutil.which("uv"),
             "run",
-            "--no-project",
             "--with",
             "fastapi",
             "--with",
@@ -959,9 +961,6 @@ def fake_upstream() -> None:
             break
         except httpx.HTTPError:
             time.sleep(0.5)
-    else:
-        proc.terminate()
-        pytest.skip("fake upstream did not start (uv or network unavailable)")
     yield
     proc.terminate()
     proc.wait(timeout=5)
@@ -978,7 +977,6 @@ def mcp_server() -> None:
         [
             shutil.which("uv"),
             "run",
-            "--no-project",
             "--with",
             "mcp==1.29.0",
             "python3",
@@ -993,9 +991,6 @@ def mcp_server() -> None:
             break
         except httpx.HTTPError:
             time.sleep(0.5)
-    else:
-        proc.terminate()
-        pytest.skip("mcp server did not start (uv or network unavailable)")
     yield
     proc.terminate()
     proc.wait(timeout=5)
@@ -1015,7 +1010,6 @@ def mcp_websocket_server() -> None:
         [
             shutil.which("uv"),
             "run",
-            "--no-project",
             "--with",
             "mcp==1.29.0",
             "--with",
@@ -1034,9 +1028,6 @@ def mcp_websocket_server() -> None:
             break
         except httpx.HTTPError:
             time.sleep(0.5)
-    else:
-        proc.terminate()
-        pytest.skip("mcp websocket server did not start (harness unavailable)")
     yield
     proc.terminate()
     proc.wait(timeout=5)
@@ -1092,6 +1083,56 @@ class TestToolSourcesLiveEndToEnd:
         ) as agent:
             await agent.run("Run a shell command.")
         assert called["ran"] is False
+
+    async def test_track_tool_denials_sees_a_denied_tool_call(self, fake_upstream: None) -> None:
+        """Regression test: a denied tool_call does NOT raise (see maf.py's
+        "Enforcement asymmetry"), so a caller that classifies a turn as
+        allowed/denied by inspecting only the model's own final text --
+        e.g. examples/maf_webapp's chat UI -- has no reliable signal that
+        anything was blocked; it renders whatever the model said next as
+        an ordinary, successful reply. track_tool_denials() exists so a
+        caller can know deterministically, from the same denial Cedar
+        made, instead of trusting the model's paraphrase."""
+
+        def execute_shell(command: str) -> str:
+            return "should never run"
+
+        chat_mw, func_mw = build_middleware(
+            POLICIES, POLICIES / "entities.json", "track-denials-test"
+        )
+        async with Agent(
+            client=OpenAIChatCompletionClient(),
+            name="A",
+            instructions="Use the tool.",
+            tools=[execute_shell],
+            middleware=[chat_mw, func_mw],
+        ) as agent:
+            with track_tool_denials() as denials:
+                assert denials == []
+                await agent.run("Run a shell command.")
+            assert denials
+            assert "execute_shell" not in "".join(denials)  # reason text, not the tool name
+
+    async def test_track_tool_denials_empty_when_nothing_denied(self, fake_upstream: None) -> None:
+        """An allowed tool call leaves the tracker empty -- this context
+        manager must never manufacture a false positive."""
+
+        def get_forecast(latitude: float, longitude: float) -> str:
+            return "sunny"
+
+        chat_mw, func_mw = build_middleware(
+            POLICIES, POLICIES / "entities.json", "track-denials-allow-test"
+        )
+        async with Agent(
+            client=OpenAIChatCompletionClient(),
+            name="A",
+            instructions="Use the tool.",
+            tools=[get_forecast],
+            middleware=[chat_mw, func_mw],
+        ) as agent:
+            with track_tool_denials() as denials:
+                await agent.run("What's the weather at 10,10?")
+            assert denials == []
 
     async def test_mcp_streamable_http_tool_allowed(
         self, fake_upstream: None, mcp_server: None
@@ -1207,7 +1248,7 @@ class TestToolSourcesLiveEndToEnd:
     async def test_mcp_stdio_tool_allowed(self, fake_upstream: None) -> None:
         from agent_framework import MCPStdioTool
 
-        stdio_server = str(REPO_ROOT / "conformance" / "mcp-probe" / "stdio_server.py")
+        stdio_server = str(REPO_ROOT / "spike" / "maf_mcp_check" / "stdio_server.py")
         chat_mw, func_mw = build_middleware(
             POLICIES, POLICIES / "entities.json", "mcp-stdio-allow-test"
         )
@@ -1215,7 +1256,7 @@ class TestToolSourcesLiveEndToEnd:
             MCPStdioTool(
                 name="probe-stdio",
                 command=shutil.which("uv"),
-                args=["run", "--no-project", "--with", "mcp==1.29.0", "python3", stdio_server],
+                args=["run", "--with", "mcp==1.29.0", "python3", stdio_server],
             ) as mcp_tool,
             Agent(
                 client=OpenAIChatCompletionClient(),
@@ -1235,14 +1276,14 @@ class TestToolSourcesLiveEndToEnd:
         transport, not just the allow path."""
         from agent_framework import MCPStdioTool
 
-        stdio_server = str(REPO_ROOT / "conformance" / "mcp-probe" / "stdio_server.py")
+        stdio_server = str(REPO_ROOT / "spike" / "maf_mcp_check" / "stdio_server.py")
         engine, caller = _engine_and_caller()
         func_mw = ParapetFunctionMiddleware(engine, caller)
 
         async with MCPStdioTool(
             name="probe-stdio",
             command=shutil.which("uv"),
-            args=["run", "--no-project", "--with", "mcp==1.29.0", "python3", stdio_server],
+            args=["run", "--with", "mcp==1.29.0", "python3", stdio_server],
         ) as mcp_tool:
             execute_shell = next(f for f in mcp_tool.functions if f.name == "execute_shell")
             ctx = FunctionInvocationContext(
@@ -1296,7 +1337,7 @@ class TestOtelLogMode:
     """configure_otel()'s log_mode= -- Simple (streaming) vs Batch
     (buffered) processors for the two EXTERNAL exporters (azure_monitor,
     otlp), and flush_otel()'s shutdown-on-exit behavior. Inspects
-    maf_module._otel_tracer_provider/_otel_logger_provider directly
+    governance_runtime's own _otel_tracer_provider/_otel_logger_provider directly
     (module state configure_otel() always sets, unconditionally) rather
     than trace.get_tracer_provider() -- OTel's own global registration
     is a set-once-per-process guard in some SDK versions, which would
@@ -1322,6 +1363,7 @@ class TestOtelLogMode:
     directly; see that fixture's own docstring."""
 
     def test_streaming_uses_simple_processors(self) -> None:
+        import parapetai_agent.governance_runtime as gr_module
         import parapetai_agent.maf as maf_module
 
         maf_module.configure_otel(
@@ -1330,34 +1372,36 @@ class TestOtelLogMode:
             console=False,
             log_mode="streaming",
         )
-        tp = maf_module._otel_tracer_provider
+        tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = [type(p).__name__ for p in tp._active_span_processor._span_processors]
         assert processor_types == ["SimpleSpanProcessor"]
 
     def test_buffered_is_the_default_and_uses_batch_processors(self) -> None:
+        import parapetai_agent.governance_runtime as gr_module
         import parapetai_agent.maf as maf_module
 
         maf_module.configure_otel(
             service_name="test", otlp_endpoint="https://cp.example", console=False
         )
-        tp = maf_module._otel_tracer_provider
+        tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = [type(p).__name__ for p in tp._active_span_processor._span_processors]
         assert processor_types == ["BatchSpanProcessor"]
 
     def test_batch_schedule_delay_defaults_to_two_minutes(self) -> None:
-        from parapetai_agent.maf import _DEFAULT_BATCH_SCHEDULE_DELAY_S
+        from parapetai_agent.governance_runtime import _DEFAULT_BATCH_SCHEDULE_DELAY_S
 
         assert _DEFAULT_BATCH_SCHEDULE_DELAY_S == 120.0
 
     def test_console_processor_is_always_simple_regardless_of_log_mode(self) -> None:
         """console=True's own processor is unaffected by log_mode -- it's
         for live debugging, never worth batching."""
+        import parapetai_agent.governance_runtime as gr_module
         import parapetai_agent.maf as maf_module
 
         maf_module.configure_otel(service_name="test", console=True, log_mode="buffered")
-        tp = maf_module._otel_tracer_provider
+        tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = [type(p).__name__ for p in tp._active_span_processor._span_processors]
         assert processor_types == ["SimpleSpanProcessor"]
@@ -1419,22 +1463,24 @@ class TestOtelCorrelation:
             InMemorySpanExporter,
         )
 
-        import parapetai_agent.maf as maf_module
+        import parapetai_agent.governance_runtime as gr_module
 
         span_exporter = InMemorySpanExporter()
         tracer_provider = TracerProvider()
         tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
         otel_trace.set_tracer_provider(tracer_provider)
-        # maf_module._tracer was created at import time, before any provider
-        # existed -- verified separately that trace.get_tracer() returns a
-        # lazy proxy that still picks up a provider set later, so no
-        # monkeypatch is needed for _tracer specifically, only for
-        # _otel_logger (a plain None-checked reference, not a lazy proxy).
+        # maf.py's own module-level `_tracer = trace.get_tracer(__name__)`
+        # was created at import time, before any provider existed --
+        # verified separately that trace.get_tracer() returns a lazy proxy
+        # that still picks up a provider set later, so no monkeypatch is
+        # needed for _tracer specifically, only for _otel_logger (a plain
+        # None-checked reference, not a lazy proxy) -- which now lives in
+        # governance_runtime, shared by every framework integration.
 
         log_exporter = InMemoryLogRecordExporter()
         logger_provider = LoggerProvider()
         logger_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
-        monkeypatch.setattr(maf_module, "_otel_logger", logger_provider.get_logger("test"))
+        monkeypatch.setattr(gr_module, "_otel_logger", logger_provider.get_logger("test"))
 
         def lookup_order(order_id: str) -> str:
             return f"order {order_id}: shipped"
@@ -2193,9 +2239,9 @@ class TestBundledDefaultPolicy:
         assert decision.allowed
 
     def test_bundled_default_dir_is_a_real_installed_path(self) -> None:
-        from parapetai_agent.maf import _bundled_default_policy_dir
+        from parapetai_agent.governance_runtime import bundled_default_policy_dir
 
-        default_dir = _bundled_default_policy_dir()
+        default_dir = bundled_default_policy_dir()
         assert (default_dir / "00-base.cedar").is_file()
         assert (default_dir / "entities.json").is_file()
 
@@ -2297,9 +2343,14 @@ class TestBuildMiddlewareIdentityRegistry:
         # races this test's assertion (flaky "assert 2 == 1" under load). The
         # construction-time synchronous poll_once is untouched, so the counts
         # below reflect construction alone.
-        import parapetai_agent.maf as maf_module
+        # Patched on parapetai_agent.control_plane, not on maf: the poller is
+        # started inside control_plane.bootstrap_engine (shared by maf, adk and
+        # Governor.from_control_plane) and resolves the name in its OWN module,
+        # so patching maf's namespace would silently miss and let the real
+        # daemon thread race this assertion again.
+        import parapetai_agent.control_plane as cp_module
 
-        monkeypatch.setattr(maf_module, "run_bundle_poller", lambda *a, **k: None)
+        monkeypatch.setattr(cp_module, "run_bundle_poller", lambda *a, **k: None)
 
         policy_dir = tmp_path / "policies"
         route = respx.get("https://cp.example/api/v1/bundle").mock(
@@ -2372,17 +2423,17 @@ class TestOtelAutoWiring:
 
     @respx.mock
     def test_control_plane_configured_auto_configures_otel(self) -> None:
-        import parapetai_agent.maf as maf_module
+        import parapetai_agent.governance_runtime as gr_module
 
-        assert maf_module._otel_tracer_provider is None
+        assert gr_module._otel_tracer_provider is None
         self._mock_control_plane()
         build_middleware(
             agent_id="otel-auto-1",
             control_plane_url="https://cp.example",
             agent_secret="the-secret",  # noqa: S106 -- test fixture, not a real credential
         )
-        assert maf_module._otel_tracer_provider is not None
-        assert maf_module._otel_logger is not None
+        assert gr_module._otel_tracer_provider is not None
+        assert gr_module._otel_logger is not None
         # Stop the background bundle-poll thread WHILE respx's mock is
         # still active (this decorated function is still executing) --
         # otherwise it outlives this test's own @respx.mock scope (which
@@ -2396,14 +2447,14 @@ class TestOtelAutoWiring:
 
     @respx.mock
     def test_no_control_plane_leaves_otel_unconfigured(self) -> None:
-        import parapetai_agent.maf as maf_module
+        import parapetai_agent.governance_runtime as gr_module
 
         build_middleware(POLICIES, POLICIES / "entities.json", agent_id="otel-auto-2")
-        assert maf_module._otel_tracer_provider is None
+        assert gr_module._otel_tracer_provider is None
 
     @respx.mock
     def test_otel_log_mode_streaming_threads_through(self) -> None:
-        import parapetai_agent.maf as maf_module
+        import parapetai_agent.governance_runtime as gr_module
 
         self._mock_control_plane()
         build_middleware(
@@ -2413,7 +2464,7 @@ class TestOtelAutoWiring:
             otel_log_mode="streaming",
         )
         reset_middleware_registry()  # see the first test's own comment on why
-        tp = maf_module._otel_tracer_provider
+        tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
         # console=True's own SimpleSpanProcessor is always present alongside
@@ -2423,7 +2474,7 @@ class TestOtelAutoWiring:
 
     @respx.mock
     def test_otel_log_mode_defaults_to_buffered(self) -> None:
-        import parapetai_agent.maf as maf_module
+        import parapetai_agent.governance_runtime as gr_module
 
         self._mock_control_plane()
         build_middleware(
@@ -2432,14 +2483,14 @@ class TestOtelAutoWiring:
             agent_secret="the-secret",  # noqa: S106 -- test fixture, not a real credential
         )
         reset_middleware_registry()  # see the first test's own comment on why
-        tp = maf_module._otel_tracer_provider
+        tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
         assert processor_types == {"SimpleSpanProcessor", "BatchSpanProcessor"}
 
     @respx.mock
     def test_console_false_disables_the_auto_wired_otel_console_exporter(self) -> None:
-        import parapetai_agent.maf as maf_module
+        import parapetai_agent.governance_runtime as gr_module
 
         self._mock_control_plane()
         build_middleware(
@@ -2449,7 +2500,7 @@ class TestOtelAutoWiring:
             console=False,
         )
         reset_middleware_registry()  # see the first test's own comment on why
-        tp = maf_module._otel_tracer_provider
+        tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
         # No ConsoleSpanExporter-backed SimpleSpanProcessor -- only the
@@ -2462,10 +2513,11 @@ class TestOtelAutoWiring:
         Azure Monitor export, like examples/maf_webapp/web_app.py's
         lifespan()) must not be silently clobbered by this auto-wiring --
         first call wins, matching OTel's own set-once global registration."""
+        import parapetai_agent.governance_runtime as gr_module
         import parapetai_agent.maf as maf_module
 
         maf_module.configure_otel(service_name="my-own-config", console=False)
-        tp_before = maf_module._otel_tracer_provider
+        tp_before = gr_module._otel_tracer_provider
         assert tp_before is not None
 
         self._mock_control_plane()
@@ -2477,7 +2529,7 @@ class TestOtelAutoWiring:
 
         # Still the SAME provider instance -- auto-wiring stepped aside
         # entirely rather than reconfiguring over it.
-        assert maf_module._otel_tracer_provider is tp_before
+        assert gr_module._otel_tracer_provider is tp_before
         reset_middleware_registry()  # see the first test's own comment on why
 
 

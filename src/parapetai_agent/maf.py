@@ -188,17 +188,13 @@ is unaffected -- both can run at once, independently.
 
 from __future__ import annotations
 
-import atexit
 import contextlib
 import contextvars
 import json
-import logging
-import logging.handlers
 import os
 import threading
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Literal
 
@@ -214,39 +210,49 @@ from agent_framework import (
 )
 from azure.core.credentials import TokenCredential
 from opentelemetry import trace
-from opentelemetry._logs import Logger as _OtelLogger
-from opentelemetry._logs import SeverityNumber
 from opentelemetry.context import Context as OtelContext
-from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import ConsoleLogExporter, SimpleLogRecordProcessor
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from opentelemetry.trace import NonRecordingSpan, SpanContext, Status, StatusCode
 
-import parapetai_agent.policy as parapetai_agent_policy
 from parapetai_agent import pep_identity
-from parapetai_agent._exceptions import GovernanceDenied
 from parapetai_agent.content_checks import ContentCheckConfig
-from parapetai_agent.control_plane import (
-    default_pep_id,
-    ensure_pep_identity,
-    poll_once,
-    run_bundle_poller,
-    send_heartbeat,
+from parapetai_agent.control_plane import bootstrap_engine
+from parapetai_agent.governance_runtime import GovernanceDenied as GovernanceDenied
+from parapetai_agent.governance_runtime import audit as _audit
+from parapetai_agent.governance_runtime import configure_otel as configure_otel
+from parapetai_agent.governance_runtime import (
+    configure_rotating_audit_log as configure_rotating_audit_log,
+)
+from parapetai_agent.governance_runtime import (
+    content_check_failure_decision as _content_check_failure_decision,
+)
+from parapetai_agent.governance_runtime import flush_otel as flush_otel
+from parapetai_agent.governance_runtime import installed_version as _installed_version
+from parapetai_agent.governance_runtime import otel_configured
+from parapetai_agent.governance_runtime import record_tool_denial as _record_tool_denial
+from parapetai_agent.governance_runtime import resolve_policy_source as _resolve_policy_source
+from parapetai_agent.governance_runtime import set_oi_attributes as _set_oi_attributes
+from parapetai_agent.governance_runtime import track_tool_denials as track_tool_denials
+from parapetai_agent.governance_runtime import (
+    unresolved_alter_decision as _unresolved_alter_decision,
 )
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.otel import openinference as oi
-from parapetai_agent.policy.engine import Decision, PolicyEngine
-from parapetai_agent.policy.hooks import GovernanceHook, content_free
+from parapetai_agent.policy.engine import PolicyEngine
+from parapetai_agent.policy.hooks import GovernanceHook
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.response_judge import JudgeConfig
-from parapetai_agent.token_identity import (
-    ExtractedIdentity,
-    JwtIdentityExtractor,
-    TokenIdentityExtractor,
+from parapetai_agent.scoped_data import (
+    _CombinedIdentityContext,
+    effective_identity_claims,
+    effective_identity_roles,
 )
+from parapetai_agent.scoped_data import agent_identity as agent_identity
+from parapetai_agent.scoped_data import current_identity as current_identity
+from parapetai_agent.scoped_data import effective_principal as _effective_principal
+from parapetai_agent.scoped_data import identity_from_bearer_token as identity_from_bearer_token
+from parapetai_agent.scoped_data import set_current_identity as set_current_identity
+from parapetai_agent.token_identity import TokenIdentityExtractor
 
 log = structlog.get_logger(__name__)
 
@@ -258,15 +264,6 @@ log = structlog.get_logger(__name__)
 # spans are harmless no-ops (trace_id=0) -- importing this module stays
 # side-effect free either way.
 _tracer = trace.get_tracer(__name__)
-# None until configure_otel() runs; _emit_otel_decision() no-ops until then.
-_otel_logger: _OtelLogger | None = None
-# Held so flush_otel()/the atexit hook can reach them later -- OTel's own
-# trace.get_tracer_provider() would work for the tracer half, but there's
-# no equivalent global getter for the logger half, so both are stored
-# explicitly here for symmetry rather than mixing global-lookup and
-# module-state approaches.
-_otel_tracer_provider: TracerProvider | None = None
-_otel_logger_provider: LoggerProvider | None = None
 
 # Maps a MAF chat client class name to the same provider strings the HTTP
 # parsers use (parapetai_agent.providers.parsers.PARSERS), so one Cedar policy set
@@ -356,255 +353,6 @@ _current_chat: contextvars.ContextVar[_ChatCorrelation | None] = contextvars.Con
 )
 
 _PREVIEW_CHARS = 2000
-
-# GovernanceDenied is defined at base level (parapetai_agent._exceptions) and
-# imported above, so a denial is ONE catchable type across both this MAF adapter
-# and the framework-neutral govern() facade, and is importable with no
-# agent_framework dependency. `from parapetai_agent.maf import GovernanceDenied`
-# still works via that import.
-
-
-@dataclass(slots=True, frozen=True)
-class _Identity:
-    """What set_current_identity()/current_identity() puts in
-    _current_identity -- see that ContextVar's docstring for why this
-    exists at all (identity has no ambient source in MAF's own context
-    objects; verified directly against AgentSession, which carries only
-    session_id/service_session_id, nothing identity-shaped)."""
-
-    claims: dict[str, str] = field(default_factory=dict)
-    roles: list[str] = field(default_factory=list)
-
-
-_current_identity: contextvars.ContextVar[_Identity | None] = contextvars.ContextVar(
-    "parapetai_agent_maf_current_identity", default=None
-)
-
-
-def set_current_identity(
-    *, claims: Mapping[str, Any] | None = None, roles: Sequence[Any] | None = None
-) -> contextvars.Token[_Identity | None]:
-    """Sets the end user's identity ambiently for every governed
-    model_call/tool_call decision made from here on, in this asyncio task
-    (and any child task created from within it -- ordinary contextvars
-    copy-on-task-creation semantics), without repeating
-    function_invocation_kwargs on every single agent.run() call.
-
-    Why this exists: nothing in MAF's own request objects carries an
-    ambient "current end user" -- verified directly, not assumed
-    (AgentSession, the one plausible place, has only session_id/
-    service_session_id; there is no HTTP request or session token this
-    library can inspect on its own). Identity has to enter the system from
-    the embedding application at least once. What this removes is having
-    to re-enter it on every single agent.run() call: call this once (e.g.
-    in a web framework's request middleware, right after validating a
-    token) and every governed decision made while it's set picks it up
-    automatically.
-
-    Returns a contextvars.Token -- pass it to reset_current_identity() to
-    restore whatever was set before (typically None), the same pattern
-    contextvars.ContextVar.set()/.reset() already uses. Prefer the
-    current_identity() context manager below for the common case of "set
-    for the duration of one block"; use set_current_identity()/
-    reset_current_identity() directly only when the set and the reset
-    happen in genuinely different places (e.g. framework request/response
-    hooks that don't share a single `with` block).
-
-    An explicit identity_claims/identity_roles passed via
-    agent.run(function_invocation_kwargs={...}) still takes precedence
-    over whatever is set here -- see _identity_claims/_identity_roles.
-    """
-    identity = _Identity(
-        claims={str(k): str(v) for k, v in (claims or {}).items()},
-        roles=[str(r) for r in (roles or [])],
-    )
-    return _current_identity.set(identity)
-
-
-def reset_current_identity(token: contextvars.Token[_Identity | None]) -> None:
-    """Pairs with set_current_identity() -- see its docstring."""
-    _current_identity.reset(token)
-
-
-@contextlib.contextmanager
-def current_identity(
-    *, claims: Mapping[str, Any] | None = None, roles: Sequence[Any] | None = None
-) -> Iterator[None]:
-    """`with current_identity(claims=..., roles=...):` -- sets the end
-    user's identity ambiently for every governed decision made anywhere
-    inside this block (including everything it awaits), then restores the
-    previous value on exit, even if the block raises. See
-    set_current_identity()'s docstring for why this exists and how
-    precedence against explicit function_invocation_kwargs works."""
-    token = set_current_identity(claims=claims, roles=roles)
-    try:
-        yield
-    finally:
-        reset_current_identity(token)
-
-
-# ── Agent identity: the OTHER half, distinct from the end-user identity
-# above -- see the module docstring's "Two identities, not one" section.
-# Optional by design (a real Service Principal identity, when available
-# from a token, is more concrete than the developer-chosen agent_id string
-# GovernedAgent otherwise requires -- see build_middleware()'s agent_id
-# becoming optional, below), mirroring how end-user identity is optional.
-
-
-@dataclass(slots=True, frozen=True)
-class _AgentIdentity:
-    """What set_current_agent_identity()/agent_identity() puts in
-    _current_agent_identity -- claims here typically come from
-    parapetai_agent.token_identity.agent_identity_from_claims() (an RFC 8693
-    `act` claim, or an azp/appid fallback), but this module doesn't
-    require that specific source; anything can call
-    set_current_agent_identity() directly."""
-
-    claims: dict[str, str] = field(default_factory=dict)
-
-
-_current_agent_identity: contextvars.ContextVar[_AgentIdentity | None] = contextvars.ContextVar(
-    "parapetai_agent_maf_current_agent_identity", default=None
-)
-
-
-def set_current_agent_identity(
-    *, claims: Mapping[str, Any] | None = None
-) -> contextvars.Token[_AgentIdentity | None]:
-    """Sets the AGENT's own identity ambiently (e.g. a Service Principal's
-    client_id, decoded from a token's RFC 8693 act claim or azp/appid --
-    see parapetai_agent.token_identity), overriding the static agent_id a
-    Caller/GovernedAgent was constructed with for as long as it's set --
-    see _effective_principal(). Same set()/reset(token) shape as
-    set_current_identity(); see that function's docstring for the general
-    rationale (ambient, contextvars-backed, correctly isolated per
-    asyncio task)."""
-    return _current_agent_identity.set(
-        _AgentIdentity(claims={str(k): str(v) for k, v in (claims or {}).items()})
-    )
-
-
-def reset_current_agent_identity(token: contextvars.Token[_AgentIdentity | None]) -> None:
-    """Pairs with set_current_agent_identity() -- see its docstring."""
-    _current_agent_identity.reset(token)
-
-
-# Per-request bucket of tool-call denial REASONS, so an embedding app can tell
-# "the model answered" apart from "a tool the model tried to call was denied".
-# A denied tool_call never raises (see this module's docstring: MAF's own
-# function-invocation loop swallows a raise from FunctionMiddleware, so
-# ParapetFunctionMiddleware substitutes a GOVERNANCE_DENIED result STRING
-# instead of raising). Without this, that substituted string flows back as
-# ordinary tool output and the model paraphrases it into a normal-looking
-# answer, hiding the denial behind a green "here you go" bubble -- a real,
-# previously-shipped bug. track_tool_denials() opens a bucket for the duration
-# of one agent.run(); the middleware appends each denial reason to whatever
-# bucket is active. None (the default) means "nobody is tracking", so
-# recording is a no-op and the middleware pays nothing outside a tracked call.
-# Same contextvars discipline as _current_chat/_current_identity above: set on
-# entry, reset on exit, correctly isolated per asyncio task.
-_tool_denials: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
-    "parapetai_tool_denials", default=None
-)
-
-
-@contextlib.contextmanager
-def track_tool_denials() -> Iterator[list[str]]:
-    """Collect the reason of every tool_call ParapetFunctionMiddleware denies
-    during the wrapped block (typically one agent.run()). Yields the list the
-    middleware appends to; read it AFTER the block to see whether any tool was
-    blocked::
-
-        with track_tool_denials() as denials:
-            await agent.run(...)
-        if denials:
-            ...  # a tool call was governed away -- don't trust the model's text
-
-    An empty list means no tool_call was denied; a turn can still be denied at
-    the model_call or content-check stage, which raise GovernanceDenied instead
-    -- those are separate signals. Nesting opens an independent inner bucket
-    and the outer one resumes on exit."""
-    bucket: list[str] = []
-    token = _tool_denials.set(bucket)
-    try:
-        yield bucket
-    finally:
-        _tool_denials.reset(token)
-
-
-def _record_tool_denial(reason: str) -> None:
-    """Append a tool_call denial reason to the active track_tool_denials()
-    bucket, if one is open. A no-op when nothing is tracking (the common
-    case), so ParapetFunctionMiddleware can call it unconditionally at every
-    deny without caring whether a caller is listening."""
-    bucket = _tool_denials.get()
-    if bucket is not None:
-        bucket.append(reason)
-
-
-@contextlib.contextmanager
-def agent_identity(*, claims: Mapping[str, Any] | None = None) -> Iterator[None]:
-    """`with agent_identity(claims={"client_id": "..."}):` -- the
-    context-manager form of set_current_agent_identity()/
-    reset_current_agent_identity(), for the common case of "set for the
-    duration of one block". Usually reached via
-    identity_from_bearer_token() rather than called directly."""
-    token = set_current_agent_identity(claims=claims)
-    try:
-        yield
-    finally:
-        reset_current_agent_identity(token)
-
-
-def _effective_principal(caller: Caller) -> str:
-    """Cedar's principal for this decision. Ambient agent identity (set
-    via agent_identity()/identity_from_bearer_token(), typically from a
-    real token's act/azp/appid claim -- a genuine Service Principal
-    identity) takes precedence over caller.principal (the static
-    agent_id string a Caller/GovernedAgent was constructed with) when
-    present; otherwise falls back to caller.principal exactly as before
-    this existed. This is what makes GovernedAgent(agent_id=...)'s
-    developer-chosen string optional in practice once a real identity is
-    available from a token, without requiring it be chosen upfront."""
-    agent = _current_agent_identity.get()
-    if agent and agent.claims:
-        identifier = (
-            agent.claims.get("client_id")
-            or agent.claims.get("oid")
-            or agent.claims.get("sub")
-            or "unknown"
-        )
-        return f'Agent::"{identifier}"'
-    return caller.principal
-
-
-def identity_from_bearer_token(
-    token: str, *, extractor: TokenIdentityExtractor | None = None
-) -> _CombinedIdentityContext:
-    """The MCP-facing entry point: decodes ONE bearer token (the same one
-    used for an outbound MCP connection's `Authorization: Bearer <token>`
-    header -- see parapetai_agent.token_identity's module docstring for
-    exactly what MCP's own spec requires and doesn't) into BOTH end-user
-    and agent identity, and sets both ambiently for the duration of a
-    `with` block:
-
-        headers = {"Authorization": f"Bearer {token}"}
-        with identity_from_bearer_token(token):
-            async with MCPStreamableHTTPTool(url=..., headers=headers) as mcp_tool:
-                ...
-
-    extractor defaults to token_identity.JwtIdentityExtractor(); pass a
-    different TokenIdentityExtractor (see that Protocol's docstring) to
-    support a non-JWT token format. Either half of the extracted identity
-    may come back empty -- that's not an error, see ExtractedIdentity's
-    docstring -- and this still sets both context managers regardless, so
-    "asserted but empty" (a real user with zero roles, or a token with no
-    delegation) is preserved correctly rather than collapsed into
-    "nothing was asserted at all" (see Snapshot.to_context()'s own
-    docstring for why that distinction matters to Cedar's `has` checks).
-    """
-    identity = (extractor or JwtIdentityExtractor()).extract(token)
-    return _CombinedIdentityContext(identity)
 
 
 def identity_from_azure_credential(
@@ -719,59 +467,24 @@ def governed_identity(
             yield
 
 
-class _CombinedIdentityContext:
-    """Backs identity_from_bearer_token()'s `with` block -- a plain class,
-    not @contextlib.contextmanager, because it needs to enter/exit TWO
-    independent context managers (end-user + agent identity) together and
-    still restore each correctly even if only one was ever set."""
-
-    def __init__(self, identity: ExtractedIdentity) -> None:
-        self._identity = identity
-        self._user_token: contextvars.Token[_Identity | None] | None = None
-        self._agent_token: contextvars.Token[_AgentIdentity | None] | None = None
-
-    def __enter__(self) -> None:
-        self._user_token = set_current_identity(
-            claims=self._identity.end_user_claims, roles=self._identity.end_user_roles
-        )
-        if self._identity.agent_claims:
-            self._agent_token = set_current_agent_identity(claims=self._identity.agent_claims)
-
-    def __exit__(self, *exc_info: object) -> None:
-        if self._user_token is not None:
-            reset_current_identity(self._user_token)
-        if self._agent_token is not None:
-            reset_current_agent_identity(self._agent_token)
-
-
 def _identity_claims(kwargs: Mapping[str, Any] | None) -> dict[str, str]:
-    """Explicit function_invocation_kwargs wins if present; otherwise
-    falls back to whatever set_current_identity()/current_identity() set
-    ambiently for the current asyncio task. Falling back, not merging: an
-    explicit per-call identity_claims fully replaces the ambient one
-    (matches how you'd expect an explicit override to behave), it doesn't
-    get combined with it field-by-field."""
-    if kwargs:
-        claims = kwargs.get("identity_claims")
-        if isinstance(claims, dict):
-            return {str(k): str(v) for k, v in claims.items()}
-    ambient = _current_identity.get()
-    return dict(ambient.claims) if ambient else {}
+    """Explicit function_invocation_kwargs wins if present; otherwise falls
+    back to whatever set_current_identity()/current_identity() set
+    ambiently for the current asyncio task -- see
+    scoped_data.effective_identity_claims() for the fallback semantics.
+    Extracting the "identity_claims" key out of MAF's own
+    function_invocation_kwargs shape is the one MAF-specific step; the
+    explicit-wins-ambient-fallback precedence itself is shared with every
+    other framework integration."""
+    explicit = kwargs.get("identity_claims") if kwargs else None
+    return effective_identity_claims(explicit if isinstance(explicit, dict) else None)
 
 
 def _identity_roles(kwargs: Mapping[str, Any] | None) -> list[str]:
-    """A role claim (e.g. Entra ID app roles) is a SET, not a scalar --
-    kept separate from _identity_claims for the same reason
-    Snapshot.identity_roles is its own field, not folded into
-    identity_claims. See that field's docstring. Same
-    explicit-kwargs-first, ambient-fallback precedence as
-    _identity_claims."""
-    if kwargs:
-        roles = kwargs.get("identity_roles")
-        if isinstance(roles, (list, tuple)):
-            return [str(r) for r in roles]
-    ambient = _current_identity.get()
-    return list(ambient.roles) if ambient else []
+    """Same shape as _identity_claims, for the role SET -- see
+    scoped_data.effective_identity_roles()."""
+    explicit = kwargs.get("identity_roles") if kwargs else None
+    return effective_identity_roles(explicit if isinstance(explicit, (list, tuple)) else None)
 
 
 def _parent_context_from_correlation(chat: _ChatCorrelation) -> OtelContext | None:
@@ -784,362 +497,6 @@ def _parent_context_from_correlation(chat: _ChatCorrelation) -> OtelContext | No
     if chat.span_context is None:
         return None
     return trace.set_span_in_context(NonRecordingSpan(chat.span_context))
-
-
-def _audit(
-    decision: Decision,
-    principal: str,
-    snapshot: Snapshot,
-    resource: str,
-    context: Mapping[str, Any],
-) -> None:
-    """Same event name and shape as parapetai_gateway.server.app._audit's "decision" event
-    for the HTTP path -- existing tooling (CLAUDE.md's dev loop:
-    `jq 'select(.event=="decision")'`) works unchanged against this path too.
-    messages_preview/response_preview/tool_result_preview are stripped for
-    the same content-free-by-construction reason as the HTTP path -- see
-    CLAUDE.md invariant 10; parapetai_agent.policy.hooks.content_free is the
-    same strip GovernanceHook's own default audit callback uses, shared so
-    the post-call preview fields added for ALTER/OBSERVE can't be missed
-    here the way messages_preview almost was. determining_policies (the
-    Cedar rule ids that decided the request) rides through
-    Decision.to_audit_record() unchanged.
-
-    `principal` is taken as the caller already resolved it (via
-    _effective_principal()), not re-derived here -- so what's audited
-    always matches what Cedar actually evaluated, including when ambient
-    agent identity (set_current_agent_identity()/identity_from_bearer_token())
-    overrode a Caller's static agent_id for this decision.
-
-    Feeds BOTH sinks unconditionally -- the rotating-file/stdout structlog
-    JSON (configure_rotating_audit_log) and the OTel LogRecord
-    (configure_otel) -- each a no-op until its own configure_*() has been
-    called, so callers can use either, both, or neither."""
-    stripped_context = content_free(context)
-    record = decision.to_audit_record(
-        principal=principal,
-        action=snapshot.action,
-        resource=resource,
-        context=stripped_context,
-    )
-    log.info("decision", **record)
-    _emit_otel_decision(record, stripped_context)
-
-
-def _emit_otel_decision(record: Mapping[str, Any], context: Mapping[str, Any]) -> None:
-    """Real OTel LogRecord for the same decision _audit() just wrote as
-    structlog JSON. No-op until configure_otel() has been called, so
-    importing this module stays side-effect free.
-
-    Body/Attributes split, not one flat dict: Body ("decision") is the
-    event/message OTel's model expects (-> Azure Monitor AppTraces.Message);
-    `record` itself (principal, action, decision, reason,
-    determining_policies, context, ...) becomes Attributes
-    (-> AppTraces.Properties/customDimensions).
-
-    identity_claims.oid is additionally promoted to the enduser.id
-    semantic-convention attribute, and identity_roles to user.roles (the
-    current, non-deprecated convention -- enduser.role is deprecated in
-    its favour, confirmed against the OTel semantic conventions registry,
-    not assumed). Azure Monitor gives enduser.id special handling
-    specifically (-> the queryable user_AuthenticatedId column, confirmed
-    against Microsoft's own docs) rather than leaving it buried in
-    customDimensions like an arbitrary key.
-
-    This is deliberately the END USER's identity (e.g. Bob, from a real
-    Entra sign-in), not the same thing as record["principal"] (the calling
-    AGENT's own identity, e.g. Agent::"example-entra") -- see the module
-    docstring's "Two identities, not one" section. TraceId/SpanId are NOT
-    set explicitly here: Logger.emit() with no explicit context pulls them
-    from the currently active span automatically (verified directly against
-    opentelemetry-sdk's LogRecord construction, not assumed) -- which is
-    real and correct here specifically because _audit() is always called
-    from inside ParapetChatMiddleware/ParapetFunctionMiddleware's own
-    `with _tracer.start_as_current_span(...)` block.
-    """
-    if _otel_logger is None:
-        return
-    attributes: dict[str, Any] = dict(record)
-    identity_claims = context.get("identity_claims")
-    identity_roles = context.get("identity_roles")
-    if isinstance(identity_claims, dict) and identity_claims.get("oid"):
-        attributes["enduser.id"] = identity_claims["oid"]
-    if isinstance(identity_roles, list) and identity_roles:
-        attributes["user.roles"] = list(identity_roles)
-    _otel_logger.emit(
-        body="decision",
-        severity_number=SeverityNumber.INFO,
-        severity_text="INFO",
-        attributes=attributes,
-    )
-
-
-_audit_log_configured_dirs: set[str] = set()
-
-
-def configure_rotating_audit_log(
-    log_dir: str | Path,
-    *,
-    max_bytes: int = 10_000_000,
-    backup_count: int = 5,
-    console: bool = True,
-) -> Path:
-    """Routes every structlog event from this module (and from PolicyEngine --
-    "policy_loaded", "policy_reload_rejected", etc.) to a size-bounded,
-    rotating JSON-lines file under log_dir, in addition to stdout
-    (console=True, the default -- pass console=False to write ONLY the
-    file, e.g. for a CLI example whose own printed output shouldn't be
-    interleaved with a JSON decision stream).
-
-    The HTTP path (parapetai_gateway.server.app) has never needed this: operators
-    redirect its stdout themselves (CLAUDE.md's dev loop: `make dev >
-    /tmp/parapetai.log`). The in-process path has no equivalent convention --
-    it's a library import inside someone else's application, not a process
-    this repo owns the entrypoint of -- so callers that want a persistent,
-    bounded decision trail call this once, before build_middleware() (or
-    pass local_log_dir= to GovernedAgent/build_middleware, which calls
-    this internally -- same effect, one less line at the call site).
-
-    Not called automatically on import: importing this module must stay
-    side-effect free (CLAUDE.md: "interop is never a runtime dependency
-    of the core gateway"), and this reconfigures process-wide logging,
-    which only the embedding application should decide to do -- but IS
-    idempotent per log_dir (a real requirement once GovernedAgent could
-    call this itself: constructing several GovernedAgents with the same
-    local_log_dir in one process, e.g. one per chat session in a web app,
-    must not attach a duplicate pair of handlers -- and therefore log
-    every line twice -- on each one). A second call with a DIFFERENT
-    log_dir still attaches its own additional handler pair; only an
-    identical, already-configured log_dir is skipped -- console is only
-    read on the FIRST call for a given log_dir, same as max_bytes/
-    backup_count.
-    """
-    resolved = str(Path(log_dir).resolve())
-    if resolved in _audit_log_configured_dirs:
-        return Path(log_dir) / "parapetai-decisions.jsonl"
-    _audit_log_configured_dirs.add(resolved)
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "parapetai-decisions.jsonl"
-
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=max_bytes, backupCount=backup_count
-    )
-    file_handler.setFormatter(logging.Formatter("%(message)s"))
-    handlers: list[logging.Handler] = [file_handler]
-    if console:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(logging.Formatter("%(message)s"))
-        handlers.append(stream_handler)
-
-    # Scoped to the "parapetai_agent" and "parapetai_agent" loggers specifically, not
-    # root: structlog.get_logger(__name__) in this module produces a logger
-    # named "parapetai_agent.maf"; PolicyEngine/control_plane/pep_identity (in
-    # the separate parapetai_agent package this module depends on) produce
-    # "parapetai_agent.*" ones -- TWO different top-level namespaces post-split
-    # (they used to share one, "parapetai.*", back when this was all one
-    # package -- an attach-to-"parapetai" version of this existed then and
-    # would silently catch nothing today if it had just been renamed
-    # in place rather than re-derived). Both get their own logger + handler
-    # pair here rather than a single shared one, since there's no longer a
-    # common prefix to attach to. Unrelated libraries' own loggers (httpx's
-    # request logging, the MCP SDK's session logging, ...) are named
-    # independently and never reach either handler -- attaching to root
-    # instead was tried, in this module's original single-package form, and
-    # pulled all of that noise into what's supposed to be a narrow decision
-    # trail, found by inspecting the actual log file, not assumed clean.
-    # propagate=False on both so records aren't also duplicated to whatever
-    # the embedding application's own root handler does.
-    for logger_name in ("parapetai_agent", "parapetai_agent"):
-        pkg_logger = logging.getLogger(logger_name)
-        pkg_logger.setLevel(logging.INFO)
-        for handler in handlers:
-            pkg_logger.addHandler(handler)
-        pkg_logger.propagate = False
-
-    structlog.configure(
-        processors=[
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-    )
-    return log_path
-
-
-_DEFAULT_BATCH_SCHEDULE_DELAY_S = 120.0  # 2 minutes -- see log_mode's own docstring
-
-
-def configure_otel(
-    *,
-    service_name: str = "parapetai-interop-maf",
-    azure_monitor_connection_string: str | None = None,
-    otlp_endpoint: str | None = None,
-    otlp_headers: dict[str, str] | None = None,
-    console: bool = True,
-    log_mode: Literal["streaming", "buffered"] = "buffered",
-    batch_max_size: int = 512,
-    batch_schedule_delay_s: float = _DEFAULT_BATCH_SCHEDULE_DELAY_S,
-) -> None:
-    """Wires this module's model_call/tool_call decisions into real
-    OpenTelemetry trace correlation and LogRecord emission -- see the
-    module docstring's "OpenTelemetry / Azure Monitor compatibility"
-    section for exactly what gap this closes and what was verified (not
-    assumed) about the OTel Log Data Model and Azure Monitor's own field
-    mapping.
-
-    Sets a PROCESS-WIDE TracerProvider and LoggerProvider (OTel's own
-    global-registration model, not one per Caller/PolicyEngine) --
-    Resource.service.name therefore describes the process as a whole, not
-    any single Cedar principal, which varies per build_middleware() call
-    and is carried per-record instead (record["principal"], already in
-    every decision).
-
-    console=True (default) always exports to stdout in OTel's own
-    ConsoleSpanExporter/ConsoleLogExporter format via a SimpleSpanProcessor/
-    SimpleLogRecordProcessor -- immediate, unbuffered, independent of
-    log_mode below (console output is for live debugging, not a real
-    transport with a cost-per-call worth batching). azure_monitor_connection_string
-    is opt-in: pass os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")
-    (Azure's own standard env var name for this) to also ship the same
-    spans/logs to a real Application Insights resource via
-    azure-monitor-opentelemetry-exporter -- imported lazily, only when a
-    connection string is actually supplied, so it's never a hard
-    dependency of this module (CLAUDE.md: "interop is never a runtime
-    dependency of the core gateway" -- the same opt-in-extra discipline
-    applies one level down, to Azure export specifically, within this
-    already-optional module).
-
-    otlp_endpoint is opt-in like azure_monitor_connection_string, and
-    independent of it -- both, either, or neither may be set. Pass the
-    control plane's base URL (e.g. from PARAPETAI_OTLP_ENDPOINT /
-    settings.otlp_endpoint) to also ship spans/logs to
-    parapetai_control/otlp.py's real OTLP/HTTP (protobuf) receiver via genuine
-    OTLPSpanExporter/OTLPLogExporter -- `{otlp_endpoint}/v1/traces` and
-    `{otlp_endpoint}/v1/logs`, the OTLP spec's own standard per-signal
-    paths, so this is not a control-plane-specific wire format on either
-    side. otlp_headers should carry the agent's bearer secret (e.g.
-    {"Authorization": f"Bearer {agent_secret}"}) since the OTLP wire format
-    itself carries no agent identity -- parapetai_control.auth resolves the agent from
-    that header the same way parapetai_control/api.py's bundle endpoint does.
-
-    log_mode governs BOTH external exporters above (azure_monitor and
-    otlp) uniformly -- both are "ship telemetry off this process" sinks
-    with the identical streaming-vs-buffered tradeoff, not two separate
-    concerns:
-      - "buffered" (default): SimpleSpanProcessor/SimpleLogRecordProcessor
-        swapped for BatchSpanProcessor/BatchLogRecordProcessor --
-        accumulates up to batch_max_size records (default 512, OTel's
-        own default) OR batch_schedule_delay_s seconds (default 120 --
-        TWO MINUTES, deliberately overriding OTel's own 5-second default,
-        which is aggressive enough to matter for a chatty agent process)
-        since the LAST export, whichever comes first, then sends one
-        batch. Lower request volume to the control plane at the cost of
-        up to batch_schedule_delay_s of latency before a decision shows
-        up there -- and see flush_otel()/the atexit hook this function
-        registers for why that delay does NOT mean losing data on a
-        normal process exit.
-      - "streaming": every span/LogRecord exports the moment it's
-        emitted, same as the console path. Lower latency, higher request
-        volume -- appropriate for low-traffic agents or when you want a
-        Cedar decision visible in the control plane immediately, not
-        worth it for a busy production agent.
-
-    Independent of configure_rotating_audit_log(): call either, both, or
-    neither. _audit() feeds both sinks unconditionally; each is a no-op
-    until its own configure_*() has run.
-
-    Registers an atexit hook that flushes+shuts down both providers on
-    NORMAL interpreter exit (script end, uncaught exception, sys.exit())
-    -- covers every CLI-shaped example in this repo with zero extra code
-    at the call site. Does NOT fire on SIGTERM (Python's default SIGTERM
-    disposition terminates the process without running atexit handlers;
-    installing a competing signal.signal(SIGTERM, ...) handler here would
-    risk stealing the signal from whatever the embedding application's
-    OWN graceful-shutdown path already does with it, e.g. uvicorn's own
-    SIGTERM handling funneling into a FastAPI lifespan's `finally:`
-    block) -- a long-running server should call flush_otel() explicitly
-    from ITS OWN shutdown sequence instead; see
-    examples/maf_webapp/web_app.py's lifespan() for exactly that.
-    """
-    resource = Resource.create({"service.name": service_name, "service.namespace": "parapetai"})
-
-    tracer_provider = TracerProvider(resource=resource)
-    logger_provider = LoggerProvider(resource=resource)
-
-    if console:
-        tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-        logger_provider.add_log_record_processor(SimpleLogRecordProcessor(ConsoleLogExporter()))
-
-    def _add_external_processors(span_exporter: Any, log_exporter: Any) -> None:
-        if log_mode == "streaming":
-            tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
-            logger_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
-        else:
-            from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
-            schedule_delay_millis = batch_schedule_delay_s * 1000
-            tracer_provider.add_span_processor(
-                BatchSpanProcessor(
-                    span_exporter,
-                    max_export_batch_size=batch_max_size,
-                    schedule_delay_millis=schedule_delay_millis,
-                )
-            )
-            logger_provider.add_log_record_processor(
-                BatchLogRecordProcessor(
-                    log_exporter,
-                    max_export_batch_size=batch_max_size,
-                    schedule_delay_millis=schedule_delay_millis,
-                )
-            )
-
-    if azure_monitor_connection_string:
-        from azure.monitor.opentelemetry.exporter import (
-            AzureMonitorLogExporter,
-            AzureMonitorTraceExporter,
-        )
-
-        _add_external_processors(
-            AzureMonitorTraceExporter.from_connection_string(azure_monitor_connection_string),
-            AzureMonitorLogExporter.from_connection_string(azure_monitor_connection_string),
-        )
-
-    if otlp_endpoint:
-        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-
-        base = otlp_endpoint.rstrip("/")
-        _add_external_processors(
-            OTLPSpanExporter(endpoint=f"{base}/v1/traces", headers=otlp_headers),
-            OTLPLogExporter(endpoint=f"{base}/v1/logs", headers=otlp_headers),
-        )
-
-    trace.set_tracer_provider(tracer_provider)
-    global _otel_logger, _otel_tracer_provider, _otel_logger_provider
-    _otel_logger = logger_provider.get_logger(__name__)
-    _otel_tracer_provider = tracer_provider
-    _otel_logger_provider = logger_provider
-    atexit.register(flush_otel)
-
-
-def flush_otel() -> None:
-    """Flushes any buffered (BatchSpanProcessor/BatchLogRecordProcessor)
-    spans/LogRecords and shuts down both providers -- safe to call
-    multiple times (OTel's own shutdown() is itself idempotent) and safe
-    to call before configure_otel() has ever run (no-op, nothing to
-    flush). Registered automatically as an atexit hook by configure_otel()
-    for the normal-process-exit case; call this explicitly from a
-    long-running server's OWN shutdown sequence (e.g. a FastAPI
-    lifespan's `finally:` block) for the SIGTERM/graceful-shutdown case
-    atexit alone doesn't cover -- see configure_otel()'s own docstring
-    for why this isn't wired to a signal handler here instead."""
-    if _otel_tracer_provider is not None:
-        _otel_tracer_provider.shutdown()
-    if _otel_logger_provider is not None:
-        _otel_logger_provider.shutdown()
 
 
 def _model_to_dict(value: Any) -> dict[str, Any]:
@@ -1169,29 +526,6 @@ def _redact_all(value: Any) -> Any:
 DEFAULT_ALTER_TRANSFORMS: dict[str, Callable[[Any], Any]] = {"redact_all": _redact_all}
 
 
-def _unresolved_alter_decision(policy_generation: int, name: str) -> Decision:
-    """A synthetic deny for the one case Cedar itself never produces: an
-    ALLOW whose determining policy named an @alter_with transform that
-    isn't registered on this process. Fails closed per invariant 1 -- an
-    unresolvable alter must never fall through to passing the original,
-    unaltered content through unchanged."""
-    reason = f"unregistered alter transform: {name!r}"
-    return Decision(False, "deny", reason, policy_generation, 0.0, errors=(reason,))
-
-
-def _content_check_failure_decision(policy_generation: int, errors: tuple[str, ...]) -> Decision:
-    """A synthetic deny for a configured tier-2 content check that could
-    not run (unknown scanner_id, or the scanner raised -- see
-    parapetai_agent.content_checks's own module docstring for the full
-    reasoning). Fails closed per invariant 1: called BEFORE
-    GovernanceHook.evaluate(), so Cedar never runs and can never treat
-    the resulting missing context.content_checks key as "nothing to
-    check" -- the same silent-bypass shape an unresolved ALTER transform
-    would have if _unresolved_alter_decision above didn't exist."""
-    reason = f"content check scanner failure: {'; '.join(errors)}"
-    return Decision(False, "deny", reason, policy_generation, 0.0, errors=errors)
-
-
 def _log_content_enabled() -> bool:
     """PARAPETAI_OTEL_LOG_CONTENT, default false -- opt-in gate for every
     OpenInference content_bearing attribute (full prompt/response/tool-arg
@@ -1201,36 +535,6 @@ def _log_content_enabled() -> bool:
     every call rather than cached at import time, so a test can
     monkeypatch it per-case the same way PARAPETAI_LOG_PROMPTS's own tests do."""
     return os.environ.get("PARAPETAI_OTEL_LOG_CONTENT", "false").lower() == "true"
-
-
-def _oi_attribute_value(value: Any) -> str | bool | int | float | tuple[Any, ...]:
-    """OTel span attribute values must be a primitive or a homogeneous
-    sequence of primitives (opentelemetry.util.types.AttributeValue) --
-    the same constraint parapetai_agent.policy.hooks._otel_attribute_value
-    enforces for governance attributes. Duplicated here rather than
-    importing a "_"-prefixed name across the parapetai-agent/parapetai-agent package
-    boundary; it's a tiny, pure coercion with no state to drift."""
-    if isinstance(value, (str, bool, int, float)):
-        return value
-    if isinstance(value, (list, tuple)) and all(
-        isinstance(v, (str, bool, int, float)) for v in value
-    ):
-        return tuple(value)
-    return json.dumps(value, default=str)
-
-
-def _set_oi_attributes(span: Any, attributes: dict[str, Any]) -> None:
-    """Sets OpenInference attributes on `span`, skipping None values --
-    same is_recording() guard parapetai_agent.policy.hooks._set_span_attributes
-    uses, so this is a genuine no-op with no tracer configured (e.g. no
-    control plane wired up). Callers are responsible for only ever passing
-    a content_bearing key (see parapetai_agent.otel.openinference.BY_KEY) when
-    _log_content_enabled() is true -- this function does not itself check
-    per-key sensitivity, matching how content_free() strips at the call
-    site rather than the sink."""
-    if not span.is_recording():
-        return
-    span.set_attributes({k: _oi_attribute_value(v) for k, v in attributes.items() if v is not None})
 
 
 def _token_count_attributes(usage: Mapping[str, Any] | None) -> dict[str, int]:
@@ -1256,8 +560,20 @@ def _token_count_attributes(usage: Mapping[str, Any] | None) -> dict[str, int]:
 # Name fragments that mark a tool as READ/retrieval. Only results from tools
 # that match are usable as a groundedness SOURCE (see _grounding_source).
 _READ_TOOL_HINTS = (
-    "lookup", "get", "search", "find", "list", "fetch", "retrieve",
-    "read", "query", "describe", "show", "view", "load", "select",
+    "lookup",
+    "get",
+    "search",
+    "find",
+    "list",
+    "fetch",
+    "retrieve",
+    "read",
+    "query",
+    "describe",
+    "show",
+    "view",
+    "load",
+    "select",
 )
 
 
@@ -1707,13 +1023,6 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 context.result = transform(context.result)
 
 
-def _installed_version() -> str:
-    try:
-        return version("parapetai-gateway")
-    except PackageNotFoundError:
-        return "0.0.0-dev"
-
-
 @dataclass(slots=True)
 class _MiddlewareRegistryEntry:
     engine: PolicyEngine
@@ -1750,53 +1059,6 @@ def reset_middleware_registry() -> None:
     for entry in entries:
         if entry.thread is not None:
             entry.thread.join(timeout=5.0)
-
-
-def _bundled_default_policy_dir() -> Path:
-    # Lives in parapetai-agent (parapetai-agent/src/parapetai_agent/policy/
-    # default_policies/), not parapetai-agent -- co-located with PolicyEngine,
-    # the class that loads it, and available to any consumer of
-    # parapetai-agent's policy engine, not just this in-process embedding
-    # path. Resolved relative to parapetai_agent.policy's own package file,
-    # not this module's -- correct regardless of which package's wheel
-    # each ends up installed under.
-    return Path(parapetai_agent_policy.__file__).resolve().parent / "default_policies"
-
-
-def _resolve_policy_source(
-    policy_dir: str | Path | None, entities_path: str | Path | None
-) -> tuple[Path, Path | None]:
-    """Both policy_dir/entities_path are optional now -- this is what
-    makes that possible without weakening default-deny. Omitting
-    policy_dir uses the policy set bundled INSIDE this package
-    (default_policies/, a real, read-only file installed alongside this
-    module -- confirmed live it's included in a built wheel, not just
-    visible in an editable/source checkout), so a brand new
-    GovernedAgent(...) call enforces something real (base permits only,
-    same shape as this repo's own policies/00-base.cedar) from the
-    moment it's constructed, never a required setup step, and never
-    requires a writable filesystem -- works in a read-only container
-    (k8s, serverless) with no mounted volume. This is a STARTING POINT:
-    once a real control-plane-provisioned agent is configured, its real
-    bundle takes over (see build_middleware()'s control-plane section).
-
-    Omitting entities_path when policy_dir IS given looks for an
-    entities.json alongside it (this repo's own convention) but doesn't
-    require one to exist -- PolicyEngine already treats a missing/None
-    entities_path as zero entities, never an error, so a caller with no
-    entities to define isn't forced to create an empty file just to
-    satisfy this function's signature."""
-    if policy_dir is None:
-        default_dir = _bundled_default_policy_dir()
-        resolved_entities = (
-            Path(entities_path) if entities_path is not None else default_dir / "entities.json"
-        )
-        return default_dir, resolved_entities
-    resolved_dir = Path(policy_dir)
-    if entities_path is not None:
-        return resolved_dir, Path(entities_path)
-    candidate = resolved_dir / "entities.json"
-    return resolved_dir, candidate if candidate.exists() else None
 
 
 def build_middleware(
@@ -1995,13 +1257,15 @@ def build_middleware(
     resolved_agent_secret = agent_secret or os.environ.get("PARAPETAI_AGENT_SECRET")
     control_plane_configured = bool(resolved_control_plane_url and resolved_agent_secret)
 
-    if control_plane_configured and _otel_tracer_provider is None:
+    if control_plane_configured and not otel_configured():
         # See this function's own docstring's "OpenTelemetry is wired up
-        # automatically too" paragraph. _otel_tracer_provider is None
-        # check makes this idempotent AND yields to an embedder's own,
-        # earlier configure_otel() call (e.g. for Azure Monitor export)
-        # -- first call wins, matching OTel's own set-once global
-        # registration.
+        # automatically too" paragraph. otel_configured() is a shared,
+        # process-wide check (parapetai_agent.governance_runtime) so this
+        # stays idempotent AND yields to an embedder's own, earlier
+        # configure_otel() call (e.g. for Azure Monitor export) -- OR to
+        # another framework integration's build_*() call in the same
+        # process (e.g. parapetai_agent.adk.build_plugin()) -- first call
+        # wins, matching OTel's own set-once global registration.
         assert resolved_control_plane_url and resolved_agent_secret  # narrows for mypy
         configure_otel(
             otlp_endpoint=os.environ.get("PARAPETAI_OTLP_ENDPOINT") or resolved_control_plane_url,
@@ -2026,15 +1290,6 @@ def build_middleware(
         if cached is not None:
             return cached.chat_mw, cached.func_mw
 
-        private_key = None
-        # None (not default_key_path()) when persist_pep_key=False -- a
-        # real path here would be misleading (nothing is ever written to
-        # it) and run_bundle_poller's own rotate_key handling already
-        # treats key_path=None as "nowhere safe to persist a rotation,
-        # log and skip" (see its own docstring), exactly the right
-        # behavior for an identity that's regenerated fresh every
-        # restart anyway -- there's nothing a rotation could persist TO
-        # that would survive the next one.
         resolved_pep_key_path = (
             (Path(pep_key_path) if pep_key_path else pep_identity.default_key_path())
             if persist_pep_key
@@ -2062,90 +1317,37 @@ def build_middleware(
             groundedness.load_from_bundle(files)
             judge.load_from_bundle(files)
 
-        if control_plane_configured:
-            assert resolved_control_plane_url and resolved_agent_secret  # narrows for mypy
-            # Ed25519 identity, loaded/created and registered before the
-            # first poll_once() -- see parapetai_agent.control_plane.ensure_pep_identity.
-            private_key = ensure_pep_identity(
-                resolved_control_plane_url,
-                resolved_agent_secret,
-                resolved_pep_key_path,
-                persist=persist_pep_key,
-            )
-            if persist_policy_dir is not None:
-                # Original behavior: sync-fetch-and-write BEFORE
-                # constructing PolicyEngine, then read from the same
-                # place just written -- fails closed (raises) if this
-                # first fetch fails with nothing there yet.
-                poll_once(
-                    resolved_control_plane_url,
-                    resolved_agent_secret,
-                    persist_policy_dir,
-                    None,
-                    private_key=private_key,
-                    on_bundle=_load_bundle_configs,
-                )
-                resolved_policy_dir = Path(persist_policy_dir)
-                candidate = resolved_policy_dir / "entities.json"
-                resolved_entities_path = candidate if candidate.exists() else None
-
-        engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
-
-        if control_plane_configured and persist_policy_dir is None:
-            assert resolved_control_plane_url and resolved_agent_secret
-            # No disk target -- construct from resolved_policy_dir first
-            # (the bundled default, or an explicit local override) so the
-            # engine is already enforcing something real, then apply the
-            # real bundle directly to it in memory. poll_once() is
-            # best-effort here (logs and returns on failure, never
-            # raises) -- an unreachable control plane on a cold start
-            # means this keeps serving resolved_policy_dir's policies
-            # instead of crashing the process, picked up by the
-            # background poller below on its next successful cycle.
-            poll_once(
-                resolved_control_plane_url,
-                resolved_agent_secret,
-                None,
-                None,
-                engine=engine,
-                private_key=private_key,
-                persist_to_disk=False,
-                on_bundle=_load_bundle_configs,
-            )
-
         stop_event: threading.Event | None = None
         poll_thread: threading.Thread | None = None
         if control_plane_configured:
-            assert resolved_control_plane_url and resolved_agent_secret
-            send_heartbeat(
+            assert resolved_control_plane_url and resolved_agent_secret  # narrows for mypy
+            # Identity registration, first fetch, the disk-vs-memory choice,
+            # heartbeat and poller thread all live in ONE place
+            # (parapetai_agent.control_plane.bootstrap_engine), shared by this
+            # adapter, adk.py, and Governor.from_control_plane(). It was three
+            # near-identical copies; three copies means three sets of outage
+            # semantics, so "the agent acts as configured" could mean
+            # something different depending on which integration a developer
+            # picked. Behaviour is unchanged -- see that function's docstring
+            # for the persist_policy_dir / in-memory split this used to spell
+            # out inline.
+            boot = bootstrap_engine(
                 resolved_control_plane_url,
                 resolved_agent_secret,
-                pep_id=default_pep_id(),
+                policy_dir=resolved_policy_dir,
+                entities_path=resolved_entities_path,
+                persist_policy_dir=persist_policy_dir,
+                pep_key_path=resolved_pep_key_path,
+                mode="enforce",  # always enforces; no monitor-only mode here
                 version=_installed_version(),
-                policy_generation=engine.status["generation"],
-                bundle_digest=engine.status["digest"],
-                mode="enforce",  # build_middleware always enforces; no monitor-only mode here
-                private_key=private_key,
+                poller_name=f"bundle-poll-{resolved_agent_id}",
+                on_bundle=_load_bundle_configs,
             )
-            stop_event = threading.Event()
-            poll_thread = threading.Thread(
-                target=run_bundle_poller,
-                args=(resolved_control_plane_url, resolved_agent_secret, persist_policy_dir),
-                kwargs={
-                    "engine": engine,
-                    "pep_id": default_pep_id(),
-                    "version": _installed_version(),
-                    "mode": "enforce",
-                    "stop_event": stop_event,
-                    "private_key": private_key,
-                    "key_path": resolved_pep_key_path,
-                    "persist_to_disk": persist_policy_dir is not None,
-                    "on_bundle": _load_bundle_configs,
-                },
-                daemon=True,
-                name=f"bundle-poll-{resolved_agent_id}",
-            )
-            poll_thread.start()
+            engine = boot.engine
+            stop_event = boot.stop_event
+            poll_thread = boot.thread
+        else:
+            engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
 
         caller = Caller(agent_id=resolved_agent_id, tenant=tenant)
         chat_mw = ParapetChatMiddleware(

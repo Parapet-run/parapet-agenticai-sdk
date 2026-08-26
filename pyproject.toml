@@ -1,6 +1,6 @@
 [project]
 name = "parapetai-agent"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.12"
 description = "Open-source in-process governance for AI agent frameworks: Cedar-governed model/tool calls via build_middleware()/GovernedAgent, plus the Cedar engine, request/decision shapes, PEP<->control-plane protocol client, and Ed25519 PEP identity they run on."
 readme = "README.md"
@@ -53,9 +53,39 @@ maf = [
     # pointed at the control plane's OTLP receiver (/v1/traces, /v1/logs).
     "opentelemetry-exporter-otlp-proto-http>=1.27,<2.0",
 ]
+# Google ADK integration (adk.py: GovernedRunner, ParapetPlugin). Deliberately
+# independent of the `maf` extra above: `pip install parapetai-agent[adk]` alone
+# must work without ever importing agent_framework, and vice versa. Both source
+# their shared runtime from governance_runtime.py / scoped_data.py, so a
+# developer picks a framework without inheriting the other's dependencies.
+adk = [
+    "google-adk>=2.7,<3.0",
+    "opentelemetry-sdk>=1.27,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27,<2.0",
+]
 # IdentityMiddleware (Starlette BaseHTTPMiddleware) only -- the core stays
 # usable by a non-web consumer (CLI, worker) without a web framework.
-web = ["starlette>=0.38,<1.0"]
+#
+# Upper bound widened from <1.0 to <2.0 because google-adk>=2.7 requires
+# starlette>=1.3.1: with the old pin, `pip install parapetai-agent[adk,web]`
+# was flatly UNSATISFIABLE, so a developer could have the ADK integration or
+# IdentityMiddleware but never both. Safe to widen: identity_middleware.py
+# touches only BaseHTTPMiddleware, Request, Response and ASGIApp -- the stable
+# core that did not change shape in starlette 1.x.
+web = ["starlette>=0.38,<2.0"]
+# response_judge.py's 'litellm' backend ONLY -- the provider-agnostic judge
+# (Anthropic, Bedrock, Vertex, Groq, Ollama, ...) through one code path instead
+# of a hand-rolled vendor client per provider. The default 'slm' backend builds
+# an OpenAI/AzureOpenAI client directly and cannot reach a non-OpenAI-wire
+# endpoint at all; this closes that gap without adding a second vendor branch.
+#
+# An extra, never a base dependency: litellm pulls ~55 packages (>20MB), which
+# every `pip install parapetai-agent` adopter would otherwise pay for whether or
+# not they enable a judge. The import is lazy (inside the backend), so 'slm' and
+# the rest of the package keep working with litellm absent -- selecting the
+# backend without the extra raises a clear ImportError naming it, and the caller
+# fails closed exactly as it does for any other judge error.
+judge = ["litellm>=1.60,<2.0"]
 # NOTE: the higher-accuracy groundedness backend (groundedness.py 'hhem' via
 # _hhem.py) needs transformers + torch, deliberately NOT declared as an extra
 # (torch drags the CUDA wheel stack into the lockfile). Enable explicitly with
@@ -69,6 +99,18 @@ dev = [
     "mypy",
     "opentelemetry-sdk>=1.20,<2.0",
 ]
+
+# This repo is BOTH the parapetai-agent package (above) and a uv workspace
+# root. The two enforcement points ship from here together: the in-process
+# SDK, and the gateway PEP that evaluates the same Cedar engine for apps that
+# can't embed. Keeping them in one repo is what stops the engine forking --
+# it forked once already across two repos, and the copies drifted ~200 lines
+# apart within a day.
+#
+# The root stays the published package; members are NOT restructured into it,
+# so `pip install parapetai-agent` is unchanged.
+[tool.uv.workspace]
+members = ["gateway", "mcp-server"]
 
 [build-system]
 requires = ["hatchling"]

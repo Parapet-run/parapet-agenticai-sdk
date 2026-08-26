@@ -1,0 +1,63 @@
+[project]
+name = "parapetai-gateway"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Standalone HTTP-interception PEP (base-URL interception, ADR 0002). Depends on parapetai-agent for the Cedar engine, Snapshot/Caller, and the PEP<->control-plane protocol client -- owns none of them itself."
+license = "MIT"
+license-files = ["../LICENSE"]
+readme = "README.md"
+# MIT and PUBLISHED, like the SDK. The gateway is the SAME enforcement role,
+# just for apps that cannot embed: a closed proxy sitting in a customer's LLM
+# data path, handling their credentials under passthrough, is a much harder
+# sell to the security buyer than an auditable one -- and incoherent beside an
+# open in-process SDK doing identical work. The moat is the control plane
+# (policy authoring, tenancy, approvals, audit), not the proxy. Same shape as
+# OPA/Styra and Envoy: open the enforcement point, monetise the authority.
+#
+# It carried "Private :: Do Not Upload" while it was closed and
+# container-only. That is now wrong: this package defines a console script
+# (parapetai-gateway, below), so blocking the upload would define an entry
+# point nobody can reach without cloning. Two consumption paths, both real:
+#
+#   uvx parapetai-gateway            local dev -- one command, no Docker
+#   docker run ... / k8s manifest    production, and the ONLY option for a
+#                                    Node/Go/Java agent, which a Python
+#                                    package could never serve
+#
+# Either way the adopter changes no application code -- they point
+# OPENAI_BASE_URL at it (ADR 0002).
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "httpx>=0.28,<1.0",
+    "pydantic>=2.9,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "watchfiles>=0.24,<2.0",
+    "structlog>=24.4,<26.0",
+    "parapetai-agent",
+]
+
+[tool.uv.sources]
+parapetai-agent = { workspace = true }
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "respx>=0.22", "ruff", "mypy"]
+
+[project.scripts]
+parapetai-gateway = "parapetai_gateway.server.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/parapetai_gateway"]

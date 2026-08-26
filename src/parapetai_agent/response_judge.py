@@ -16,6 +16,15 @@ Backends plug into the JUDGES registry, exactly like groundedness.BACKENDS:
     judging (a model is a weak judge of its own output). Rubric and endpoint are
     config-driven (from the signed bundle, with env fallbacks), so the same SDK
     build serves any judge without a code change.
+  * ``litellm`` -- the provider-agnostic backend (extra: ``parapetai-agent
+    [judge]``). Same config surface as ``slm``; the model id carries the
+    provider (``anthropic/claude-haiku-4-5``, ``groq/...``, ``bedrock/...``)
+    and credentials come from that provider's own env var. Use it whenever the
+    judge model is not behind an OpenAI-compatible endpoint -- ``slm`` cannot
+    reach those at all, since it constructs an OpenAI/AzureOpenAI client
+    directly. litellm is a heavy dependency and is NEVER a base dependency of
+    this package; the import is lazy, so adopters who don't select this backend
+    never pay for it.
 
 This module only *produces* a verdict. The verdict becomes an *enforced*
 decision through Cedar: the control plane renders a ``@stage("post") forbid``
@@ -66,11 +75,18 @@ class JudgeResult:
     reason: str = ""
 
 
-def _parse_verdict(text: str, threshold: float) -> JudgeResult:
+def _parse_verdict(text: str, threshold: float, backend: str = "slm") -> JudgeResult:
     """Parse a small model's answer into pass/fail. Accepts a JSON object
     ({"pass": true, "score": 0.9}), or free text containing PASS/FAIL-like
     tokens. Anything unrecognised -> FAIL (fail-toward-flagging), so an
-    ambiguous judge output is treated as a possible violation, not a pass."""
+    ambiguous judge output is treated as a possible violation, not a pass.
+
+    `backend` is stamped onto every JudgeResult this returns. It defaults to
+    "slm" so the original caller is unchanged, but it is a parameter rather
+    than a literal because a second backend now shares this parser -- a
+    verdict labelled with the wrong backend is a lie in the audit trail, and
+    the label is how an operator tells which judge actually ran.
+    """
     raw = (text or "").strip()
     # 1) structured JSON verdict -- accept it even when the model wraps the
     # JSON in markdown fences or surrounding prose (Claude and others often
@@ -91,13 +107,13 @@ def _parse_verdict(text: str, threshold: float) -> JudgeResult:
         if isinstance(obj, dict) and ("pass" in obj or "score" in obj):
             score = float(obj.get("score", 1.0 if obj.get("pass") else 0.0))
             passed = bool(obj["pass"]) if "pass" in obj else score >= threshold
-            return JudgeResult(passed, round(score, 3), "slm", str(obj.get("reason", "")))
+            return JudgeResult(passed, round(score, 3), backend, str(obj.get("reason", "")))
     # 2) free-text verdict: a NO token anywhere means fail; else a YES token passes
     if _NO.search(raw):
-        return JudgeResult(False, 0.0, "slm", "verdict: fail")
+        return JudgeResult(False, 0.0, backend, "verdict: fail")
     if _YES.search(raw):
-        return JudgeResult(True, 1.0, "slm", "verdict: pass")
-    return JudgeResult(False, 0.0, "slm", "unparseable judge verdict")
+        return JudgeResult(True, 1.0, backend, "verdict: pass")
+    return JudgeResult(False, 0.0, backend, "unparseable judge verdict")
 
 
 _RUBRIC_SYSTEM = (
@@ -232,6 +248,22 @@ def _judge_completion(client: Any, model: str, messages: list[dict[str, str]]) -
     raise last_exc
 
 
+def _judge_messages(rubric: str, response: str) -> list[dict[str, str]]:
+    """The exact chat messages every judge backend sends.
+
+    Shared rather than repeated per backend on purpose: the control plane
+    scores evals through the SAME judge the SDK enforces at runtime
+    (parapetai_control.scorers calls judge_response), and that equivalence is
+    the whole point of reusing this module. If one backend's prompt drifted
+    from another's, an eval could pass while the runtime judge fails the same
+    response -- a silent divergence between what you tested and what you
+    enforce."""
+    return [
+        {"role": "system", "content": _RUBRIC_SYSTEM},
+        {"role": "user", "content": f"RULE:\n{rubric}\n\nASSISTANT RESPONSE:\n{response}"},
+    ]
+
+
 def _slm_judge(
     response: str, rubric: str, threshold: float, options: dict[str, Any]
 ) -> JudgeResult:
@@ -241,22 +273,88 @@ def _slm_judge(
     transport/config error so the caller fails closed; a parseable-but-ambiguous
     answer fails via _parse_verdict rather than raising."""
     client, model = _build_judge_client(options)
-    completion = _judge_completion(
-        client,
-        model,
-        [
-            {"role": "system", "content": _RUBRIC_SYSTEM},
-            {"role": "user", "content": f"RULE:\n{rubric}\n\nASSISTANT RESPONSE:\n{response}"},
-        ],
-    )
+    completion = _judge_completion(client, model, _judge_messages(rubric, response))
     content = completion.choices[0].message.content or ""
     return _parse_verdict(content, threshold)
 
 
-# backend id -> callable. 'slm' is always registered (its optional deps are
-# imported lazily). Same additive-registry shape as groundedness.BACKENDS.
+# Bounded so a chatty model can't burn budget on a verdict that is one small
+# JSON object. Deliberately not the openai backend's _JUDGE_PARAM_SHAPES
+# fallback ladder: that ladder exists because a raw OpenAI client must guess
+# which max-tokens/temperature spelling a given model family accepts, and
+# litellm already normalises those per provider. Re-implementing the probe here
+# would be duplicating work the dependency exists to do.
+_LITELLM_MAX_TOKENS = 256
+
+
+def _litellm_judge(
+    response: str, rubric: str, threshold: float, options: dict[str, Any]
+) -> JudgeResult:
+    """Provider-agnostic judge via litellm -- Anthropic, Bedrock, Vertex, Groq,
+    Ollama, and anything else litellm routes, through one code path.
+
+    Exists because the `slm` backend builds an OpenAI/AzureOpenAI client
+    directly, so it can only ever reach OpenAI-wire endpoints. That is the one
+    provider-specific corner of an SDK whose entire premise is provider
+    neutrality (providers/parsers.py speaks OpenAI, Anthropic, Gemini and MCP).
+    Adding one more hand-rolled vendor client per provider would multiply that
+    corner; routing through litellm collapses it to a single backend.
+
+    `model` carries the provider prefix (e.g. "anthropic/claude-haiku-4-5").
+    Credentials come from that provider's own conventional env var
+    (ANTHROPIC_API_KEY, GROQ_API_KEY, ...) unless a key is pinned explicitly --
+    so nothing here needs to know which provider it is talking to.
+
+    Config surface is deliberately the EXISTING one (options model/base_url/key,
+    falling back to PARAPET_SLM_JUDGE_*), not a parallel set of env vars: the
+    control plane already renders those fields into response_judge.json
+    (content_checks.render_response_judge_json), so selecting this backend needs
+    no control-plane change and no second thing for an operator to configure.
+
+    Raises on missing config or transport error, so the caller fails closed --
+    same contract as _slm_judge.
+    """
+    model = options.get("model") or os.environ.get(_ENV_MODEL)
+    if not model:
+        raise RuntimeError(
+            "litellm judge needs a model: set the check's model or "
+            f"{_ENV_MODEL} to a litellm model id such as "
+            "'anthropic/claude-haiku-4-5'; refusing to guess"
+        )
+
+    try:
+        import litellm
+    except ImportError as exc:  # pragma: no cover -- exercised via a forced fake
+        raise ImportError(
+            "the litellm judge backend needs litellm: pip install 'parapetai-agent[judge]'"
+        ) from exc
+
+    kwargs: dict[str, Any] = {}
+    # Only forward what was actually set. Passing api_base=None makes litellm
+    # skip its own provider default resolution, which breaks hosted providers.
+    base_url = options.get("base_url") or os.environ.get(_ENV_BASE_URL)
+    if base_url:
+        kwargs["api_base"] = base_url
+    key = options.get("key") or os.environ.get(_ENV_KEY)
+    if key:
+        kwargs["api_key"] = key
+
+    completion = litellm.completion(
+        model=model,
+        messages=_judge_messages(rubric, response),
+        max_tokens=_LITELLM_MAX_TOKENS,
+        **kwargs,
+    )
+    content = completion.choices[0].message.content or ""
+    return _parse_verdict(content, threshold, backend="litellm")
+
+
+# backend id -> callable. Both are always registered; their optional deps are
+# imported lazily inside the backend, so neither `openai` nor `litellm` is
+# needed to import this module or to run the other backend. Same additive-
+# registry shape as groundedness.BACKENDS.
 JudgeBackend = Callable[[str, str, float, dict[str, Any]], JudgeResult]
-JUDGES: dict[str, JudgeBackend] = {"slm": _slm_judge}
+JUDGES: dict[str, JudgeBackend] = {"slm": _slm_judge, "litellm": _litellm_judge}
 
 
 def judge_response(
