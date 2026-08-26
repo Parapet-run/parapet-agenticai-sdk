@@ -26,6 +26,23 @@ parapetai-agent, resolved entirely OUTSIDE Cedar's own evaluation:
     Never meaningful on a `forbid` -- a hard deny is never softened by an
     annotation. PolicyEngine only ever surfaces these as raw
     Decision.annotations; it has no opinion on what "alter" means.
+
+REVIEW (see docs/adr/0008): `@action("review")` on a `forbid` marks that
+deny as escalatable to a human rather than a hard stop, surfacing as
+Decision.effect == "review". This does NOT contradict the paragraph above:
+a review is still a DENY at the enforcement point -- Decision.allowed stays
+False, the call does not execute, and only a separate, out-of-band human
+approval can authorise it. An annotation still never turns a deny into an
+allow. Cedar still returns Deny; "review" is resolved outside Cedar's
+evaluation exactly as "alter" is, so invariant 3 is untouched.
+
+  Reviewability requires ALL THREE of (see _is_reviewable):
+    1. no evaluation errors  -- a fail-closed deny stays a hard deny;
+    2. a non-empty determining set -- bare default-deny is never reviewable;
+    3. EVERY determining policy carries @action("review") -- unanimity, so a
+       hard `forbid` matching alongside a reviewable one keeps the deny hard.
+  Each is a fail-closed guard. Anything unexpected degrades to a hard deny,
+  never to a reviewable one.
 """
 
 from __future__ import annotations
@@ -47,24 +64,45 @@ class PolicyLoadError(RuntimeError):
     """A policy set could not be built."""
 
 
+# The @action annotation value that makes a `forbid` escalatable to a human.
+# One constant, referenced by both the resolver and the tests, so the literal
+# a policy author writes can never drift from the literal the engine matches.
+REVIEW_ACTION = "review"
+
+
 @dataclass(frozen=True, slots=True)
 class Decision:
     """Normalised decision. Mirrors the AGT decision record shape for interop."""
 
+    # False for BOTH "deny" and "review" -- a review has not been authorised
+    # by anything, it is a deny that a human may later turn into an allow via
+    # a separate approval. Any caller written before REVIEW existed, and any
+    # caller that only ever checks `allowed`, therefore keeps blocking a
+    # review exactly as it blocked a deny. Adding REVIEW cannot make an
+    # existing integration less safe; that is why `allowed` is not a tri-state.
     allowed: bool
-    effect: str  # allow | deny
+    effect: str  # allow | deny | review
     reason: str
     policy_generation: int
     evaluation_ms: float
     determining_policies: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     # Merged Cedar annotations (e.g. @action("alter"), @alter_with("...")) of
-    # whichever policy(ies) determined an ALLOWED decision. Empty on a deny --
-    # a forbid is never softened by an annotation, see engine.py module
-    # docstring's stage/action design note. PolicyEngine stays unaware of what
-    # "alter" means; it only ever surfaces raw Cedar annotation data. See
-    # docs/adr/0006-cedar-policy-stage-and-action-annotations.md.
+    # whichever policy(ies) determined an ALLOWED decision, or a REVIEW one --
+    # where they carry the reviewer-facing detail the policy author attached
+    # (@review_reason, @risk_score, ...) and are the only channel by which it
+    # reaches an approvals UI. Empty on a HARD deny: a forbid with no review
+    # affordance is never softened OR explained by an annotation, see the
+    # module docstring. PolicyEngine stays unaware of what "alter", "review",
+    # or any annotation value means; it only ever surfaces raw Cedar
+    # annotation data. See docs/adr/0006 and docs/adr/0008.
     annotations: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def requires_review(self) -> bool:
+        """Derived from `effect`, never stored alongside it -- two fields that
+        can disagree is exactly the bug that would let a review execute."""
+        return self.effect == REVIEW_ACTION
 
     def to_audit_record(
         self, *, principal: str, action: str, resource: str, context: dict[str, Any]
@@ -321,20 +359,31 @@ class PolicyEngine:
         determining = tuple(getattr(diagnostics, "reasons", None) or ())
         eval_errors = tuple(str(e) for e in (getattr(diagnostics, "errors", None) or ()))
 
-        # Only surfaced for an ALLOW -- a forbid is never softened by an
-        # annotation (see module docstring). Merged in determining-policy
-        # order; last write wins on a key collision across multiple
-        # determining policies, an edge case a well-formed bundle shouldn't
-        # produce but that must not raise if it does.
+        review = not allowed and _is_reviewable(determining, stage_annotations, eval_errors)
+
+        # Surfaced for an ALLOW and for a REVIEW; never for a hard deny -- a
+        # forbid with no review affordance is never softened by an annotation
+        # (see module docstring). Merged in determining-policy order; last
+        # write wins on a key collision across multiple determining policies,
+        # an edge case a well-formed bundle shouldn't produce but that must
+        # not raise if it does.
         resolved_annotations: dict[str, str] = {}
-        if allowed:
+        if allowed or review:
             for policy_id in determining:
                 resolved_annotations.update(stage_annotations.get(policy_id, {}))
 
+        if allowed:
+            effect, reason = "allow", "permitted"
+        elif review:
+            effect = REVIEW_ACTION
+            reason = f"review required: {_policy_labels(determining, stage_annotations)}"
+        else:
+            effect, reason = "deny", "denied: no permit matched or forbid applied"
+
         return Decision(
             allowed=allowed,
-            effect="allow" if allowed else "deny",
-            reason="permitted" if allowed else "denied: no permit matched or forbid applied",
+            effect=effect,
+            reason=reason,
             policy_generation=generation,
             evaluation_ms=elapsed,
             determining_policies=determining,
@@ -355,6 +404,62 @@ class PolicyEngine:
 
 def _qualify(value: str, default_type: str) -> str:
     return value if "::" in value else f'{default_type}::"{value}"'
+
+
+def _is_reviewable(
+    determining: tuple[str, ...],
+    stage_annotations: dict[str, dict[str, str]],
+    eval_errors: tuple[str, ...],
+) -> bool:
+    """Is this Cedar Deny an escalation to a human, or a hard stop?
+
+    Three conditions, ALL required. Each is independently a fail-closed
+    guard -- none is a nicety, and any one of them failing keeps the deny
+    hard:
+
+    1. **No evaluation errors.** Invariant 2 requires a fail-closed deny to
+       stay distinguishable from a real policy decision. A broken bundle or
+       an unparseable context must never present to an operator as "a human
+       can approve this" -- there is no policy intent behind it to approve.
+    2. **A non-empty determining set.** An empty `reasons` is Cedar's bare
+       default-deny: nothing matched at all, so no policy author ever
+       granted a review affordance here. Reviewability must be opted into by
+       a rule, never inferred from the absence of one.
+    3. **EVERY determining policy carries @action("review").** cedarpy
+       returns ALL matching forbids in diagnostics.reasons -- verified
+       directly against cedarpy 4.x, two matching forbids come back as
+       `['policy1', 'policy0']`: note both are present, and NOT in source
+       order, so this must check every one rather than the first. A hard
+       `forbid` matching alongside a reviewable one means some rule said
+       "never", and unanimity is what stops a human approval from
+       overriding a rule that never offered one.
+
+    A determining id missing from `stage_annotations` resolves to `{}`, whose
+    "action" is None -- not REVIEW_ACTION, so it correctly forces a hard deny
+    rather than being skipped.
+    """
+    if eval_errors or not determining:
+        return False
+    return all(
+        stage_annotations.get(policy_id, {}).get("action") == REVIEW_ACTION
+        for policy_id in determining
+    )
+
+
+def _policy_labels(
+    determining: tuple[str, ...], stage_annotations: dict[str, dict[str, str]]
+) -> str:
+    """Human-readable determining-policy list for Decision.reason.
+
+    Prefers each policy's own `@id("...")` over cedarpy's positional
+    `policy0`/`policy1` ids, which are an artefact of parse order and shift
+    whenever a bundle gains or loses a rule -- useless in an audit record or
+    an approvals queue. Falls back to the positional id when a policy has no
+    @id, so this never produces an empty label.
+    """
+    return ", ".join(
+        stage_annotations.get(policy_id, {}).get("id") or policy_id for policy_id in determining
+    )
 
 
 def _probe_compile(policies: str, entities: list[dict[str, Any]]) -> str | None:
@@ -498,6 +603,10 @@ def _split_policies_by_stage(
     def _variant(keep: Any) -> tuple[str, dict[str, dict[str, str]]]:
         survivors = [
             (stmt, obj.get("annotations", {}))
+            # strict=True is safe here and not merely tidy: the length
+            # mismatch it would raise on is already rejected above with a
+            # PolicyLoadError, so by this point the two are equal by
+            # construction. Matches parapet-agenticai-sdk's copy of this file.
             for stmt, obj in zip(statements, ordered, strict=True)
             if keep(obj.get("annotations", {}))
         ]

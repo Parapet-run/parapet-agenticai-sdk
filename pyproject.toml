@@ -56,6 +56,19 @@ maf = [
 # IdentityMiddleware (Starlette BaseHTTPMiddleware) only -- the core stays
 # usable by a non-web consumer (CLI, worker) without a web framework.
 web = ["starlette>=0.38,<1.0"]
+# response_judge.py's 'litellm' backend ONLY -- the provider-agnostic judge
+# (Anthropic, Bedrock, Vertex, Groq, Ollama, ...) through one code path instead
+# of a hand-rolled vendor client per provider. The default 'slm' backend builds
+# an OpenAI/AzureOpenAI client directly and cannot reach a non-OpenAI-wire
+# endpoint at all; this closes that gap without adding a second vendor branch.
+#
+# An extra, never a base dependency: litellm pulls ~55 packages (>20MB), which
+# every `pip install parapetai-agent` adopter would otherwise pay for whether or
+# not they enable a judge. The import is lazy (inside the backend), so 'slm' and
+# the rest of the package keep working with litellm absent -- selecting the
+# backend without the extra raises a clear ImportError naming it, and the caller
+# fails closed exactly as it does for any other judge error.
+judge = ["litellm>=1.60,<2.0"]
 # NOTE: the higher-accuracy groundedness backend (groundedness.py 'hhem' via
 # _hhem.py) needs transformers + torch, deliberately NOT declared as an extra
 # (torch drags the CUDA wheel stack into the lockfile). Enable explicitly with
