@@ -310,6 +310,11 @@ mcp-server/           # parapetai-mcp: MCP server + SKILL.md for Claude Code
 tests/                # pytest suite
 conformance/          # per-framework proof the block happens in the real runtime
 policies/             # Cedar sources used as engine fixtures
+examples/             # runnable integrations: maf_sample_01..07, maf_cli,
+                      #   adk_sample_01, adk_webapp, ungoverned_vs_governed.
+                      #   The ones taking control_plane_url + agent_secret
+                      #   exercise provisioned identity end to end.
+docs/                 # ADRs, observability, the MAF integration pattern
 docs/                 # API + observability + architecture references, plus ADRs
 ```
 
