@@ -73,6 +73,48 @@ from files you manage.
 Denials raise `GovernanceDenied`; pass `raise_on_deny=False` to get the
 `Decision` back and branch on it yourself.
 
+### Three outcomes, not two — allow, deny, **review**
+
+A policy can hold a call for a person instead of refusing it outright. Annotate
+a `forbid` with `@action("review")` in the control plane, and the SDK raises
+`GovernanceReviewRequired` with a ticket you can wait on:
+
+```python
+from parapetai_agent import Governor, GovernanceReviewRequired
+
+gov = Governor.from_control_plane(policy_dir="./policies")
+
+try:
+    gov.authorize_tool("transition_issue", {"issue": "INC-42", "state": "closed"})
+except GovernanceReviewRequired as held:
+    print(held.review_id)                       # queued for a human, agent NOT blocked
+
+    if gov.wait_for_approval(held, timeout=300):  # opt in to blocking
+        transition_issue("INC-42")                # approved — valid for THIS call, once
+```
+
+The parts worth knowing:
+
+- **A held call is a deny until someone approves it.** `Decision.allowed` stays
+  `False`, and `GovernanceReviewRequired` **subclasses `GovernanceDenied`** — so
+  code written before approvals existed keeps blocking a held call. Upgrading
+  the SDK can never start executing one.
+- **It does not block by default.** You get a ticket and continue;
+  `wait_for_approval()` is opt-in. It returns `False` for *every* non-approval
+  (denied, expired, timed out, control plane unreachable), so there is one thing
+  to check and the safe answer is the default.
+- **A grant is single-use and bound to that exact call.** Approving "close
+  INC-42" cannot be replayed onto INC-43, and cannot be spent twice.
+- **An unreachable control plane cannot soften a decision.** Cedar still decides
+  locally; if the queue is unreachable, `review_id` is `None` and the call stays
+  denied. Approvals are something a connected PEP gains, never something local
+  enforcement depends on.
+- **Prompts are never sent to the queue.** A tool call's arguments are shown to
+  the approver (they are what the policy matched on); a `check_input` /
+  `check_output` call sends only a digest.
+
+See **[docs/adr/0009](docs/adr/0009-approval-loop.md)** for the design.
+
 ### A specific framework — `GovernedAgent` / `GovernedRunner`
 
 Pick your framework and install its extra; the rest of the interface stays the
@@ -250,7 +292,8 @@ These are security properties, not defaults you can tune away:
 ```
 src/parapetai_agent/
   govern.py           # Governor — the framework-neutral entry point (any framework)
-  _exceptions.py      # GovernanceDenied — catchable without importing any framework
+  _exceptions.py      # GovernanceDenied / GovernanceReviewRequired — catchable
+                      #   without importing any framework
   maf.py              # GovernedAgent, build_middleware, configure_otel — the MAF integration
   policy/             # Cedar engine, request/decision shapes, stage split
   content_checks.py   # PII / secrets / injection / profanity scanners (input guardrails)

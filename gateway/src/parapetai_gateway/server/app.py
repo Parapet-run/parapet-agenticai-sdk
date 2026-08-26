@@ -15,6 +15,7 @@ buffering an SSE response breaks them. We relay chunks as they arrive.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import deque
 from collections.abc import AsyncIterator
@@ -25,12 +26,20 @@ import httpx
 import structlog
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
+from parapetai_agent.control_plane import ReviewClient, review_fingerprint
 from parapetai_agent.identity import Caller, resolve_from_path
 from parapetai_agent.policy.engine import Decision, PolicyEngine
-from parapetai_agent.providers.parsers import parse_request
+from parapetai_agent.providers.parsers import Snapshot, parse_request
 from parapetai_gateway.config import settings
 from parapetai_gateway.fingerprint import fingerprint
+
+# The header a held call comes back on, and the one a client re-presents to
+# collect its approval. Named once: a typo in either direction would silently
+# turn "approved and retried" into "held again", which looks like a queue that
+# never drains rather than like a bug.
+REVIEW_HEADER = "x-parapetai-review-id"
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
@@ -41,9 +50,13 @@ router = APIRouter()
 _OBSERVATIONS_CAP = 500
 
 
-def create_app(engine: PolicyEngine) -> FastAPI:
+def create_app(engine: PolicyEngine, reviews: ReviewClient | None = None) -> FastAPI:
     app = FastAPI(title="Parapet", docs_url="/__parapetai/docs", redoc_url=None)
     app.state.engine = engine
+    # None when no control plane is configured -- the gateway then behaves
+    # exactly as it did before approvals existed: a review is refused and
+    # never queued, because there is no queue and so nobody to ask.
+    app.state.reviews = reviews
     app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout)
     observations: deque[dict[str, Any]] = deque(maxlen=_OBSERVATIONS_CAP)
     app.state.observations = observations
@@ -149,13 +162,30 @@ async def proxy(full_path: str, request: Request) -> Response:
     )
 
     # Covers both "deny" and "review": Decision.allowed is False for each, and
-    # neither may reach the upstream. A review differs only in what the caller
-    # is told (see _provider_shaped_block) -- the gateway itself has no
-    # approval workflow, so a held call is refused now and the agent retries
-    # once a human has approved it out of band.
-    if not decision.allowed:
+    # neither reaches the upstream on its own. A review differs in that it can
+    # be RESOLVED -- the caller gets a ticket on the 403 and re-presents it
+    # once a human has approved (docs/adr/0009). Collection is attempted only
+    # here, AFTER Cedar has already returned `review` for this exact request:
+    # that ordering is what stops an approval unblocking a call that policy
+    # has since hardened into a plain deny.
+    #
+    # Only when enforcing. In monitor mode nothing is blocked, so there is no
+    # held call to approve and queueing one would fill an operator's queue with
+    # requests that already went through.
+    approved, review_id = False, None
+    if not decision.allowed and settings.enforcing and decision.requires_review:
+        approved, review_id = await _resolve_review(
+            request,
+            agent_id=caller.agent_id,
+            path=path,
+            snapshot=snapshot,
+            decision=decision,
+            raw=raw,
+        )
+
+    if not decision.allowed and not approved:
         if settings.enforcing:
-            return _provider_shaped_block(snapshot.provider, decision)
+            return _provider_shaped_block(snapshot.provider, decision, review_id=review_id)
         log.warning(
             "monitor_would_block",
             agent=caller.agent_id,
@@ -279,7 +309,102 @@ _MCP_ERROR_DENY = -32000
 _MCP_ERROR_REVIEW = -32001
 
 
-def _provider_shaped_block(provider: str, decision: Decision) -> JSONResponse:
+def _review_fingerprint(agent_id: str, path: str, snapshot: Snapshot, raw: bytes) -> str:
+    """Bind an approval to THIS request, bytes and all.
+
+    The gateway hashes the raw body rather than parsed arguments. For a tool
+    call the SDK's (tool, args) pair would do, but a model call carries its
+    payload in the body, and a fingerprint over `action` alone would be
+    identical for every model call to the same endpoint -- one approval would
+    then unlock any later prompt. Hashing the bytes closes that, and makes the
+    "approve a small request, retry with a bigger one" attack fail at the
+    control plane, which compares the two fingerprints and refuses a mismatch.
+
+    The body is hashed, never sent: a digest is not content (invariant 10).
+    """
+    return review_fingerprint(
+        agent_id=agent_id,
+        action=snapshot.action,
+        tool_name=snapshot.tool_name,
+        args={"path": path, "body_sha256": hashlib.sha256(raw).hexdigest()},
+    )
+
+
+async def _resolve_review(
+    request: Request,
+    *,
+    agent_id: str,
+    path: str,
+    snapshot: Snapshot,
+    decision: Decision,
+    raw: bytes,
+) -> tuple[bool, str | None]:
+    """Collect an existing approval for this request, or queue a new one.
+
+    Returns `(approved, review_id)`. `approved` is True only when this call
+    just collected a grant for exactly these bytes -- the single thing that
+    lets a held request through to the upstream.
+
+    Called ONLY after Cedar has already returned `review` for this request, and
+    that ordering is load-bearing: a grant can never unblock a hard `deny`, so
+    if policy hardened between the approval and the retry the collection is
+    never even attempted. The client re-presents the ticket rather than the
+    gateway retrying on its own -- a proxy must not replay a non-idempotent
+    request on the caller's behalf.
+
+    ReviewClient is synchronous httpx, so both calls go through the threadpool;
+    running them inline would block the event loop for every other in-flight
+    proxied request while the control plane answers.
+    """
+    reviews: ReviewClient | None = request.app.state.reviews
+    if reviews is None:
+        return False, None
+
+    fp = _review_fingerprint(agent_id, path, snapshot, raw)
+
+    presented = request.headers.get(REVIEW_HEADER)
+    if presented:
+        granted = await run_in_threadpool(reviews.collect, review_id=presented, fingerprint=fp)
+        if granted and granted.get("allowed"):
+            log.info(
+                "review_approved",
+                agent=agent_id,
+                review_id=presented,
+                action=snapshot.action,
+                path=path,
+            )
+            return True, presented
+        # Not approved, mismatched, expired, or already spent. Fall through and
+        # queue a FRESH review rather than echoing a ticket that will never
+        # come good -- a client that retried with a different body must not be
+        # handed back the id of the approval it just failed to use.
+        log.warning("review_not_collectable", agent=agent_id, review_id=presented)
+
+    # Tool arguments are what the policy matched on and are what an approver
+    # needs to see. A model call's payload is the prompt, so it is never
+    # previewed -- only fingerprinted above.
+    preview = (
+        json.dumps(snapshot.tool_args, sort_keys=True, default=str)[:2000]
+        if snapshot.tool_name and snapshot.tool_args
+        else None
+    )
+    body = await run_in_threadpool(
+        reviews.submit,
+        fingerprint=fp,
+        tool_name=snapshot.tool_name,
+        action=snapshot.action,
+        policy_id=decision.determining_policies[0] if decision.determining_policies else None,
+        reason=decision.annotations.get("review_reason") or decision.reason,
+        risk_score=decision.annotations.get("risk_score"),
+        args_preview=preview,
+    )
+    review_id = body.get("review_id") if body else None
+    return False, (str(review_id) if review_id else None)
+
+
+def _provider_shaped_block(
+    provider: str, decision: Decision, review_id: str | None = None
+) -> JSONResponse:
     """Return a non-allowed decision in the provider's own error shape.
 
     Covers a hard deny and a held-for-review call. SDKs parse errors
@@ -300,10 +425,20 @@ def _provider_shaped_block(provider: str, decision: Decision) -> JSONResponse:
         if review
         else f"Blocked by governance policy: {decision.reason}"
     )
+    if review and review_id:
+        # The retry instruction belongs in the human-readable message too. A
+        # 403 body is often the only thing an operator sees in an agent's logs,
+        # and a bare ticket with no hint of what to do with it is a dead end.
+        message += (
+            f" (review {review_id} — once approved, retry this request with "
+            f"{REVIEW_HEADER}: {review_id})"
+        )
     headers = {
         "x-parapetai-decision": decision.effect,
         "x-parapetai-policy-generation": str(decision.policy_generation),
     }
+    if review_id:
+        headers[REVIEW_HEADER] = review_id
 
     payload: dict[str, Any]
     if provider == "anthropic":
@@ -312,13 +447,19 @@ def _provider_shaped_block(provider: str, decision: Decision) -> JSONResponse:
         payload = {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": message}}
     elif provider == "mcp":
         code = _MCP_ERROR_REVIEW if review else _MCP_ERROR_DENY
-        payload = {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": None}
+        error: dict[str, Any] = {"code": code, "message": message}
+        if review_id:
+            # JSON-RPC clients read the error object and never see headers, so
+            # for MCP the ticket has to ride in `data` or it is unreachable.
+            error["data"] = {"review_id": review_id, "retry_header": REVIEW_HEADER}
+        payload = {"jsonrpc": "2.0", "error": error, "id": None}
     else:
         payload = {
             "error": {
                 "type": "permission_error",
                 "code": "governance_review_required" if review else "governance_denied",
                 "message": message,
+                **({"review_id": review_id} if review_id else {}),
             }
         }
     return JSONResponse(payload, status_code=403, headers=headers)

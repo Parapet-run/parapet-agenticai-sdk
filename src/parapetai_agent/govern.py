@@ -27,15 +27,17 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from parapetai_agent.control_plane import Bootstrap
+    from parapetai_agent.control_plane import Bootstrap, ReviewClient
 
-from parapetai_agent._exceptions import GovernanceDenied
+from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequired
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import Caller
@@ -44,7 +46,7 @@ from parapetai_agent.policy.hooks import GovernanceHook, OnDecision
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.response_judge import JudgeConfig
 
-__all__ = ["Governor", "GovernanceDenied"]
+__all__ = ["Governor", "GovernanceDenied", "GovernanceReviewRequired"]
 
 # Chars of prompt/response kept SDK-side so scanners can see them. Never logged:
 # the audit record is content-free (parapetai_agent.policy.hooks.content_free).
@@ -82,6 +84,11 @@ class Governor:
         # for every locally-constructed Governor, so stop_sync() is safe to
         # call regardless of how this was built.
         self._bootstrap: Bootstrap | None = None
+        # Likewise None for a locally-constructed Governor: with no control
+        # plane there is no queue and therefore no human to ask, so a review
+        # stays a plain deny. Approvals are an affordance a connected PEP
+        # gains, never a requirement local policy enforcement takes on.
+        self._reviews: ReviewClient | None = None
 
     # ------------------------------------------------------------------ #
     # constructors
@@ -166,7 +173,12 @@ class Governor:
         The returned Governor owns a daemon poller thread; call
         `.stop_sync()` to end it (tests, or a process that constructs many).
         """
-        from parapetai_agent.control_plane import bootstrap_engine, sdk_version
+        from parapetai_agent.control_plane import (
+            ReviewClient,
+            bootstrap_engine,
+            default_pep_id,
+            sdk_version,
+        )
 
         url = control_plane_url or os.environ.get("PARAPETAI_CONTROL_PLANE_URL")
         secret = agent_secret or os.environ.get("PARAPETAI_AGENT_SECRET")
@@ -214,6 +226,13 @@ class Governor:
             on_decision=on_decision,
         )
         governor._bootstrap = boot
+        governor._reviews = ReviewClient(
+            control_plane_url=url,
+            agent_secret=secret,
+            agent_id=resolved_agent_id,
+            private_key=boot.private_key,
+            pep_id=default_pep_id(),
+        )
         return governor
 
     def stop_sync(self, timeout: float | None = None) -> None:
@@ -259,7 +278,13 @@ class Governor:
                 return self._deny(self._failure_decision(res.errors), raise_on_deny)
             extra = res.context
         result = self._hook.evaluate(snapshot=snap, stage="pre", extra_context=extra or None)
-        return self._finish(result.decision, raise_on_deny)
+        # No args_preview: the "arguments" of a model call are the prompt, and
+        # invariant 10 keeps prompt content out of anything the control plane
+        # stores unless someone explicitly opts in. The fingerprint still binds
+        # the grant to this exact prompt -- a digest is not content.
+        return self._finish(
+            result.decision, raise_on_deny, action="model_call", args={"text": str(text)}
+        )
 
     def authorize_tool(
         self,
@@ -284,7 +309,17 @@ class Governor:
             identity_roles=roles_l,
         )
         result = self._hook.evaluate(snapshot=snap, stage="pre")
-        return self._finish(result.decision, raise_on_deny)
+        # Tool arguments ARE previewable: they are what the policy already
+        # matched on, and an approver who cannot see which issue is being
+        # closed cannot meaningfully approve closing it.
+        return self._finish(
+            result.decision,
+            raise_on_deny,
+            action="tool_call",
+            tool_name=name,
+            args=dict(arguments or {}),
+            preview=json.dumps(dict(arguments or {}), sort_keys=True, default=str)[:2000],
+        )
 
     def check_output(
         self,
@@ -323,7 +358,11 @@ class Governor:
         if errors:  # a scorer could not run -> fail closed
             return self._deny(self._failure_decision(tuple(errors)), raise_on_deny)
         result = self._hook.evaluate(snapshot=snap, stage="post", extra_context=extra or None)
-        return self._finish(result.decision, raise_on_deny)
+        # Same content rule as check_input: the response is model output, so it
+        # is fingerprinted but never previewed into the queue.
+        return self._finish(
+            result.decision, raise_on_deny, action="model_response", args={"text": str(response)}
+        )
 
     # ------------------------------------------------------------------ #
     # convenience: a decorator that authorizes a tool before it runs
@@ -384,7 +423,28 @@ class Governor:
         reason = f"content check scanner failure: {'; '.join(errors)}"
         return Decision(False, "deny", reason, gen, 0.0, errors=tuple(errors))
 
-    def _finish(self, decision: Decision, raise_on_deny: bool) -> Decision:
+    def _finish(
+        self,
+        decision: Decision,
+        raise_on_deny: bool,
+        *,
+        action: str = "",
+        tool_name: str | None = None,
+        args: Mapping[str, Any] | None = None,
+        preview: str | None = None,
+    ) -> Decision:
+        if decision.requires_review and raise_on_deny:
+            # Queued only on the raising path, which is the default and the
+            # only one that can hand the caller a review_id -- Decision is
+            # frozen, so a non-raising return has nowhere to carry one, and
+            # silently queueing a review the caller can never poll would just
+            # accumulate unanswerable rows in an operator's queue. A
+            # raise_on_deny=False caller asks for it explicitly via
+            # request_approval().
+            review_id, fingerprint = self.request_approval(
+                decision, action=action, tool_name=tool_name, args=args, preview=preview
+            )
+            raise GovernanceReviewRequired(decision, review_id=review_id, fingerprint=fingerprint)
         if raise_on_deny and not decision.allowed:
             raise GovernanceDenied(decision)
         return decision
@@ -393,3 +453,88 @@ class Governor:
         if raise_on_deny:
             raise GovernanceDenied(decision)
         return decision
+
+    # ------------------------------------------------------------------ #
+    # approvals (ADR 0009)
+    # ------------------------------------------------------------------ #
+    def request_approval(
+        self,
+        decision: Decision,
+        *,
+        action: str = "",
+        tool_name: str | None = None,
+        args: Mapping[str, Any] | None = None,
+        preview: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Queue a held call for a human. Returns `(review_id, fingerprint)`.
+
+        `review_id` is None when there is no control plane configured, or it
+        could not be reached. Neither is an error to handle: the call was
+        already denied locally and stays denied -- there is simply nobody to
+        ask. This is what keeps the control plane on the approval path and off
+        the decision path.
+
+        Called for you by the default `raise_on_deny=True` path; call it
+        directly only if you passed `raise_on_deny=False` and want the review
+        anyway.
+        """
+        fingerprint = ""
+        if self._reviews is None:
+            return None, fingerprint
+        fingerprint = self._reviews.fingerprint(action=action, tool_name=tool_name, args=args)
+        body = self._reviews.submit(
+            fingerprint=fingerprint,
+            tool_name=tool_name,
+            action=action,
+            # ADR 0008: a review resolves annotations, and they are the only
+            # channel by which the policy author's reviewer-facing detail
+            # reaches this queue. A hard deny carries none, by design.
+            policy_id=decision.determining_policies[0] if decision.determining_policies else None,
+            reason=decision.annotations.get("review_reason") or decision.reason,
+            risk_score=decision.annotations.get("risk_score"),
+            args_preview=preview,
+        )
+        review_id = body.get("review_id") if body else None
+        return (str(review_id) if review_id else None), fingerprint
+
+    def wait_for_approval(
+        self,
+        held: GovernanceReviewRequired,
+        *,
+        timeout: float = 300.0,
+        poll_interval: float = 2.0,
+    ) -> bool:
+        """Block until a human answers the held call. True means approved AND
+        collected -- the caller may proceed exactly once.
+
+        Takes the raised exception rather than a bare review_id because
+        collecting a grant needs the call's fingerprint too, and the exception
+        already carries both. Passing them separately would let a caller
+        collect one review's grant while about to perform a different call --
+        the control plane refuses that, but the API should not invite it.
+
+        Returns False for every other outcome (denied, expired, never queued,
+        control plane unreachable, timed out) so a caller has one thing to
+        check. False is always safe: it means the local deny stands.
+
+        Polling, not a held connection -- an approval takes as long as a human
+        takes, and nothing should keep an HTTP request open for minutes.
+        """
+        if self._reviews is None or not held.review_id:
+            return False
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            body = self._reviews.collect(
+                review_id=held.review_id, fingerprint=held.fingerprint or ""
+            )
+            if body is not None:
+                if body.get("allowed"):
+                    return True
+                # Terminal states end the wait immediately: nobody is coming to
+                # change a denied or expired review, and polling one until the
+                # timeout only delays the caller's own error path.
+                if body.get("status") in ("denied", "expired", "consumed"):
+                    return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))

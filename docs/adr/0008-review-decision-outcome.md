@@ -138,6 +138,10 @@ a retroactive weakening of this one.
   for MCP (`-32001` vs `-32000`), and a distinct `code` in the fallback
   error shape. HTTP status stays 403 on purpose: a 2xx would make a provider
   SDK try to deserialise a held call as a successful completion.
+  *(Amended by ADR 0009: the gateway now has an approval workflow. The 403 and
+  every distinction above are unchanged — what is added is a
+  `x-parapetai-review-id` ticket on the refusal, which the client re-presents
+  to collect its approval on the retry.)*
 - **The console classifies review as its own verdict.** Before this, the
   verdict classifier tested `if not is_deny: verdict_kind = "allow"`, which
   would have rendered a held call with the green allow pill — a call that
