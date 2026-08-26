@@ -73,8 +73,14 @@ from files you manage.
 Denials raise `GovernanceDenied`; pass `raise_on_deny=False` to get the
 `Decision` back and branch on it yourself.
 
-### Microsoft Agent Framework — `GovernedAgent`
+### A specific framework — `GovernedAgent` / `GovernedRunner`
 
+Pick your framework and install its extra; the rest of the interface stays the
+same — same `agent_id=` / `policy_dir=` / `control_plane_url=` kwargs, same
+`GovernanceDenied`, same identity API, whichever you choose. `maf` and `adk`
+are independent: installing one never pulls in the other's SDK.
+
+**Microsoft Agent Framework** (`pip install parapetai-agent[maf]`) —
 `GovernedAgent` is a drop-in replacement for `agent_framework.Agent`:
 
 ```python
@@ -108,6 +114,35 @@ mw = build_middleware(
 )
 agent = SomeFrameworkAgent(..., middleware=[mw])
 ```
+
+**Google ADK** (`pip install parapetai-agent[adk]`):
+
+```python
+from parapetai_agent.adk import GovernedRunner as Runner
+
+runner = Runner(
+    app_name="support",
+    agent=root_agent,
+    session_service=session_service,
+    agent_id="pa-e3931c464751",
+    control_plane_url="https://control.parapet.example",
+    agent_secret="...",
+)
+
+async for event in runner.run_async(user_id="alice", session_id=sid, new_message=message):
+    if event.error_code == "governance_denied":
+        print(event.error_message)
+```
+
+`GovernedAgent` and `GovernedRunner` are drop-in replacements for each
+framework's own `Agent`/`Runner`. The class differs because each framework puts
+its governable seam in a different place (MAF: `Agent(middleware=[...])`; ADK:
+`Runner(plugins=[...])`), not because the integration differs. Building your own
+chain instead? `build_middleware()` (MAF) and `build_plugin()` (ADK) return the
+same governance to wire in yourself. Reaching for
+`google.adk.runners.InMemoryRunner`? `parapetai_agent.adk.InMemoryGovernedRunner`
+mirrors it exactly — same in-memory session/artifact/memory defaults, plus
+governance.
 
 ## Can't change the app? Use the gateway
 
@@ -184,6 +219,7 @@ schema: **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)**.
 | Extra | Brings in | For |
 |---|---|---|
 | `maf` | `agent-framework`, `mcp`, OpenTelemetry SDK + OTLP exporter | Microsoft Agent Framework integration and OTel export |
+| `adk` | `google-adk`, OpenTelemetry SDK + OTLP exporter | Google ADK integration and OTel export |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction |
 | `judge` | `litellm` | The provider-agnostic SLM-judge backend — Anthropic, Bedrock, Vertex, Groq, Ollama. Not needed for the default `slm` backend, which speaks the OpenAI wire. |
 | _(base)_ | `cedarpy`, `httpx`, `cryptography`, `opentelemetry-api` | Cedar engine, control-plane protocol client, Ed25519 PEP identity |
