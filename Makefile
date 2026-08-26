@@ -13,7 +13,7 @@ install:
 test: test-sdk test-gateway
 
 test-sdk:
-	uv run --extra maf --extra judge --extra dev pytest tests -q
+	uv run --extra maf --extra adk --extra judge --extra dev pytest tests -q
 
 test-gateway:
 	uv run --package parapetai-gateway --extra dev pytest gateway/tests -q
@@ -23,7 +23,7 @@ lint:
 	uv run --extra dev ruff format --check src gateway/src
 
 typecheck:
-	uv run --extra dev mypy src
+	uv run --extra maf --extra adk --extra judge --extra dev mypy src
 	uv run --package parapetai-gateway --extra dev mypy gateway/src
 
 check: lint typecheck test
@@ -31,4 +31,4 @@ check: lint typecheck test
 # The end-to-end MCP/live tests spawn fixture servers via `uv run` (see
 # conformance/README.md); they skip cleanly if uv is unavailable.
 conformance:
-	uv run --extra maf --extra dev pytest -q tests/test_maf.py -k "ToolSourcesLiveEndToEnd or GovernedAgent"
+	uv run --extra maf --extra adk --extra dev pytest -q tests/test_maf.py -k "ToolSourcesLiveEndToEnd or GovernedAgent"

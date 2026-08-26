@@ -1,33 +1,43 @@
 """Bridges an implementor's own already-authenticated request state into
-parapetai_agent.maf.current_identity()'s ambient context, automatically, for
-every request -- so agent.run() calls anywhere in a handler are governed
-by the signed-in caller's identity without wrapping each one in
-`with current_identity(...):` by hand.
+parapetai_agent.scoped_data.current_identity()'s ambient context,
+automatically, for every request -- so any governed call anywhere in a
+handler (parapetai_agent.maf's agent.run(), parapetai_agent.adk's
+runner.run_async(), or any future framework integration built the same
+way) is governed by the signed-in caller's identity without wrapping each
+one in `with current_identity(...):` by hand.
 
 Requires the optional `web` extra (`pip install parapetai-agent[web]`) --
-Starlette is a real dependency of THIS module only. parapetai_agent's core
-(build_middleware()/GovernedAgent) must stay usable by a non-web consumer
-(a CLI script, a background worker) without forcing a web-framework
-dependency on it, matching CLAUDE.md's "interop is optional" stance
-already applied to the `maf` extra. Importing this module without
-`web` installed raises a normal ImportError at the `import starlette`
-line, not a silent no-op.
+Starlette is a real dependency of THIS module only. Deliberately
+independent of BOTH the `maf` and `adk` extras: `current_identity` is
+imported from `parapetai_agent.scoped_data` (framework-agnostic, zero
+optional dependencies of its own), not from either framework module, so
+`pip install parapetai-agent[adk,web]` alone can use this middleware
+without ever importing `agent_framework` -- and vice versa. A prior
+version of this file imported `current_identity` from
+`parapetai_agent.maf` directly, which meant importing THIS module
+silently required the `maf` extra even for an ADK-only deployment; fixed
+during the adk.py/scoped_data.py split, verified live by simulating an
+environment with agent_framework absent.
 
 ## What this can't do, and why
 
 Full automatic identity detection -- zero implementor involvement at all
 -- is not possible. Verified directly, not assumed (parapetai_agent/maf.py's
-own docstring): Microsoft Agent Framework's AgentSession carries only
-session_id/service_session_id, nothing identity-shaped, and every IdP's
-claims format differs, so *something* has to decode a raw token/session
-into Cedar's (identity_claims, identity_roles) shape. That decoding step
+own docstring, and parapetai_agent/adk.py's own module docstring's
+"Identity" section for the ADK-specific version of the same point):
+neither MAF's AgentSession nor ADK's Session carry a verified identity --
+MAF's carries only session_id/service_session_id, ADK's user_id is a
+plain, unauthenticated string -- and every IdP's claims format differs,
+so *something* has to decode a raw token/session into Cedar's
+(identity_claims, identity_roles) shape. That decoding step
 (parapetai_agent.token_identity.identity_from_claims(), typically called once
 inside an implementor's own /auth/callback route) is unavoidable and
 stays exactly as it is today.
 
 What THIS class removes is the *per-call-site* burden of re-entering
-current_identity() around every single agent.run(). Wired once
-(`app.add_middleware(IdentityMiddleware)`), not per route, not per call.
+current_identity() around every single governed call. Wired once
+(`app.add_middleware(IdentityMiddleware)`), not per route, not per call --
+see examples/adk_webapp/ for this wired onto a real ADK FastAPI app.
 
 For the common case -- identity IS a JWT bearer token on a request header
 or cookie -- jwt_bearer_extractor() below is a ready-made extractor= that
@@ -45,7 +55,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
-from parapetai_agent.maf import current_identity
+from parapetai_agent.scoped_data import current_identity
 from parapetai_agent.token_identity import decode_jwt_claims, identity_from_claims
 
 Extractor = Callable[[Request], tuple[Mapping[str, Any], Sequence[str]] | None]

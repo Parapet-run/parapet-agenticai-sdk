@@ -43,6 +43,42 @@ dependency of the core gateway" rule forbids. A prior version of this
 file did that unconditionally and broke the control-plane Docker build
 (`--no-dev`, no `maf` extra installed) with `ModuleNotFoundError:
 No module named 'agent_framework'` -- keep this guarded.
+
+`GovernedRunner`/`build_plugin`/etc. (parapetai_agent/adk.py, Google ADK)
+are a SEPARATE framework integration behind its own `adk` extra
+(`google-adk`, again the OpenTelemetry SDK) -- guarded the identical way,
+and deliberately independent of the `maf` guard above: `pip install
+parapetai-agent[adk]` alone must work without ever importing
+`agent_framework`, and vice versa. Shared names that mean the exact same
+thing regardless of which framework you picked (GovernanceDenied,
+configure_otel, configure_rotating_audit_log, flush_otel,
+track_tool_denials, current_identity, identity_from_bearer_token,
+agent_identity) are re-exported from BOTH blocks -- harmless, since
+maf.py and adk.py both source them from the same underlying
+parapetai_agent.governance_runtime/scoped_data modules, so whichever
+block's import wins binds the identical object either way (verified via
+mypy --strict, which would flag a real type mismatch if it weren't).
+`governed_identity` is the one exception: maf.py defines its OWN,
+strictly richer version (adds a `credential=` source, for azure-identity
+credentials -- see maf.py's own docstring) rather than re-exporting
+scoped_data's base one, so the two are NOT interchangeable objects (mypy
+caught this as a real "Incompatible import" error when both were
+re-exported here under the same name). This top level therefore keeps
+`maf.py`'s version at `parapetai_agent.governed_identity` (the
+established name, unchanged), and does not export the adk block's own
+-- reach it as `parapetai_agent.adk.governed_identity` (claims/roles/token
+sources only, no `credential=`) if you specifically want ADK's without
+also installing `maf`.
+`GovernedAgent`/`build_middleware`/DEFAULT_ALTER_TRANSFORMS (MAF's own,
+agent_framework-shaped) and `GovernedRunner`/`build_plugin` (ADK's own,
+google-adk-shaped) are each framework's OWN names, not unified -- see
+adk.py's module docstring for why forcing one shared "GovernedX" name
+across frameworks whose own architecture puts the governable seam on a
+different class would be misleading, not just a naming preference.
+`parapetai_agent.adk.DEFAULT_ALTER_TRANSFORMS` is intentionally NOT
+re-exported at this top level (it would collide with maf.py's own,
+non-identical, ChatResponse-shaped default) -- import it from
+`parapetai_agent.adk` directly if you need ADK's specifically.
 """
 
 from __future__ import annotations
@@ -61,6 +97,7 @@ from parapetai_agent.identity_store import (
 from parapetai_agent.token_identity import identity_from_claims
 
 __all__ = [
+    # Framework-neutral entry point -- works with no framework at all.
     "GovernanceDenied",
     "Governor",
     "IdentityKeyKind",
@@ -82,6 +119,7 @@ try:
     # this whole block must stay guarded.
     from parapetai_agent.maf import DEFAULT_ALTER_TRANSFORMS as DEFAULT_ALTER_TRANSFORMS
     from parapetai_agent.maf import GovernedAgent as GovernedAgent
+    from parapetai_agent.maf import agent_identity as agent_identity
     from parapetai_agent.maf import build_middleware as build_middleware
     from parapetai_agent.maf import configure_otel as configure_otel
     from parapetai_agent.maf import configure_rotating_audit_log as configure_rotating_audit_log
@@ -91,12 +129,14 @@ try:
     from parapetai_agent.maf import (
         identity_from_azure_credential as identity_from_azure_credential,
     )
+    from parapetai_agent.maf import identity_from_bearer_token as identity_from_bearer_token
     from parapetai_agent.maf import reset_middleware_registry as reset_middleware_registry
     from parapetai_agent.maf import track_tool_denials as track_tool_denials
 
     __all__ += [
         "DEFAULT_ALTER_TRANSFORMS",
         "GovernedAgent",
+        "agent_identity",
         "build_middleware",
         "configure_otel",
         "configure_rotating_audit_log",
@@ -104,7 +144,44 @@ try:
         "flush_otel",
         "governed_identity",
         "identity_from_azure_credential",
+        "identity_from_bearer_token",
         "reset_middleware_registry",
+        "track_tool_denials",
+    ]
+except ImportError:
+    pass
+
+try:
+    # Same guarded-import discipline, for the `adk` extra -- see module
+    # docstring's second paragraph for which names are shared with the
+    # `maf` block above vs. genuinely ADK-only.
+    from parapetai_agent.adk import GovernedRunner as GovernedRunner
+    from parapetai_agent.adk import InMemoryGovernedRunner as InMemoryGovernedRunner
+    from parapetai_agent.adk import agent_identity as agent_identity
+    from parapetai_agent.adk import build_plugin as build_plugin
+    from parapetai_agent.adk import configure_otel as configure_otel
+    from parapetai_agent.adk import configure_rotating_audit_log as configure_rotating_audit_log
+    from parapetai_agent.adk import current_identity as current_identity
+    from parapetai_agent.adk import flush_otel as flush_otel
+    from parapetai_agent.adk import identity_from_bearer_token as identity_from_bearer_token
+    from parapetai_agent.adk import reset_plugin_registry as reset_plugin_registry
+    from parapetai_agent.adk import track_tool_denials as track_tool_denials
+
+    # governed_identity deliberately NOT re-exported here -- see module
+    # docstring's "governed_identity is the one exception" paragraph.
+    # parapetai_agent.adk.governed_identity is still reachable directly.
+
+    __all__ += [
+        "GovernedRunner",
+        "InMemoryGovernedRunner",
+        "agent_identity",
+        "build_plugin",
+        "configure_otel",
+        "configure_rotating_audit_log",
+        "current_identity",
+        "flush_otel",
+        "identity_from_bearer_token",
+        "reset_plugin_registry",
         "track_tool_denials",
     ]
 except ImportError:

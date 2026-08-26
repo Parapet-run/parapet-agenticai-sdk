@@ -26,6 +26,12 @@ All notable changes to this project are documented here. The format is based on
   this routes Anthropic, Bedrock, Vertex, Groq, Ollama and the rest through one
   code path rather than a vendor client per provider.
 
+- **Google ADK integration** (`adk.py`: `GovernedRunner`, `ParapetPlugin`)
+  behind its own `adk` extra, independent of `maf` -- `pip install
+  parapetai-agent[adk]` works without ever importing `agent_framework`, and
+  vice versa. Both source their shared runtime from `governance_runtime.py` /
+  `scoped_data.py`, so a developer picks a framework without inheriting the
+  other's dependencies.
 - **The gateway PEP now ships from this repo** (`gateway/`), MIT-licensed and
   publishable, with a console script: `uvx parapetai-gateway`. It is the same
   enforcement role as this package in a different form factor — for apps that
@@ -45,11 +51,28 @@ All notable changes to this project are documented here. The format is based on
   policy the enforcing SDK cannot execute.
 
 ### Fixed
+- `pip install parapetai-agent[adk,web]` was **unsatisfiable**: the `web` extra
+  pinned `starlette>=0.38,<1.0` while `google-adk>=2.7` requires
+  `starlette>=1.3.1`. A developer could have the ADK integration or
+  `IdentityMiddleware`, never both. The `web` bound is widened to `<2.0` --
+  `identity_middleware.py` touches only `BaseHTTPMiddleware`, `Request`,
+  `Response` and `ASGIApp`, the stable core unchanged in starlette 1.x.
 - The heartbeat `version` field reported the **gateway's** package version
   (`parapetai-gateway`) rather than this SDK's — a copy-paste from the
   gateway's own helper. Since that package is normally absent from an embedded
   SDK, every SDK PEP reported `0.0.0-dev`. Now reports `parapetai-agent` via
-  `control_plane.sdk_version()`.
+  `control_plane.sdk_version()`. The same bug had been copied into
+  `governance_runtime.installed_version()`; that now delegates to the one
+  implementation rather than becoming a third copy.
+- Three near-identical ~90-line control-plane bootstraps (in `maf.py`,
+  `adk.py`, and `Governor.from_control_plane`) collapsed into
+  `control_plane.bootstrap_engine()`. Three copies meant three sets of outage
+  semantics, so "the agent acts as configured" could differ by which
+  integration a developer picked.
+- `GovernanceDenied` had two definitions (`_exceptions.py` and
+  `governance_runtime.py`). Two same-named classes look identical and fail
+  every `except` that caught the other; `governance_runtime` now re-exports
+  the one in `_exceptions`, which needs no framework to import.
 
 ## [0.2.0]
 

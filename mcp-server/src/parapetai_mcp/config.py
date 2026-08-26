@@ -21,7 +21,7 @@ _CONFIG_DIR = Path(os.environ.get("PARAPETAI_MCP_CONFIG_DIR", str(Path.home() / 
 _CREDENTIALS_PATH = _CONFIG_DIR / "credentials.json"
 
 DEFAULT_CONTROL_PLANE_URL = os.environ.get(
-    "PARAPETAI_CONTROL_PLANE_URL", "http://localhost:8090"
+    "PARAPETAI_CONTROL_PLANE_URL", "https://app.parapet.run"
 )
 
 

@@ -41,13 +41,19 @@ def _reset_otel_module_state() -> Iterator[None]:
     while building this feature. Directly resetting opentelemetry.trace's
     own internal _TRACER_PROVIDER/_TRACER_PROVIDER_SET_ONCE globals is
     reaching into OTel's private state, but there is no public "unset"
-    API and no cleaner seam available."""
-    import parapetai_agent.maf as maf_module
+    API and no cleaner seam available.
+
+    The provider state itself lives in parapetai_agent.governance_runtime,
+    not parapetai_agent.maf -- shared by every in-process framework
+    integration (parapetai_agent.maf, parapetai_agent.adk, ...) so that
+    "has this process already configured OTel" is one answer, not one per
+    framework module. See that module's own docstring."""
+    import parapetai_agent.governance_runtime as gr_module
 
     yield
-    maf_module._otel_tracer_provider = None
-    maf_module._otel_logger_provider = None
-    maf_module._otel_logger = None
+    gr_module._otel_tracer_provider = None
+    gr_module._otel_logger_provider = None
+    gr_module._otel_logger = None
 
     import opentelemetry.trace as trace_api
     from opentelemetry.util._once import Once

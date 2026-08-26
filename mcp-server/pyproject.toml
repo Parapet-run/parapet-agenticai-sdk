@@ -1,8 +1,8 @@
 [project]
 name = "parapetai-mcp"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12"
-description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships with a packaged SKILL.md."
+description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships two packaged SKILL.md files, one per framework integration (Microsoft Agent Framework, Google ADK)."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -39,4 +39,5 @@ build-backend = "hatchling.build"
 packages = ["src/parapetai_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/parapetai_mcp/skills/SKILL.md" = "parapetai_mcp/skills/SKILL.md"
+"src/parapetai_mcp/skills/maf/SKILL.md" = "parapetai_mcp/skills/maf/SKILL.md"
+"src/parapetai_mcp/skills/adk/SKILL.md" = "parapetai_mcp/skills/adk/SKILL.md"
