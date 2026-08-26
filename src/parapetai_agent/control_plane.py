@@ -27,6 +27,9 @@ import os
 import socket
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -408,3 +411,166 @@ def run_bundle_poller(
                 else:
                     log.warning("key_rotation_requested_but_no_key_path_configured")
         stop_event.wait(interval_s)
+
+
+def sdk_version() -> str:
+    """This SDK's installed version, for the heartbeat's `version` field.
+
+    That field is how the control plane's fleet table reports WHICH PEP build
+    is enforcing -- the evidence behind "the agent is acting as configured".
+
+    Reports `parapetai-agent`, deliberately. maf.py used to carry its own copy
+    of this helper that asked for `parapetai-gateway`: a straight copy-paste
+    from the gateway's identical helper (parapetai_gateway/server/main.py),
+    where that package name is correct. In an embedded SDK the gateway package
+    is normally absent, so the lookup raised and every SDK PEP reported
+    "0.0.0-dev" -- and on a host that happened to have the gateway installed
+    it reported the GATEWAY's version for an SDK PEP, which is worse than
+    unknown. The gateway keeps its own helper and passes its own value to
+    bootstrap_engine(version=...); this one is the SDK's.
+    """
+    try:
+        return _pkg_version("parapetai-agent")
+    except PackageNotFoundError:
+        return "0.0.0-dev"
+
+
+@dataclass(frozen=True, slots=True)
+class Bootstrap:
+    """What a control-plane-governed PEP needs to start enforcing.
+
+    `stop_event`/`thread` are None when no background sync was started
+    (`start_poller=False`) -- a caller that owns its own loop, or a test.
+    Call `stop()` to end the poller; it is a no-op when none is running.
+    """
+
+    engine: PolicyEngine
+    private_key: Ed25519PrivateKey | None = None
+    stop_event: threading.Event | None = None
+    thread: threading.Thread | None = None
+
+    def stop(self, timeout: float | None = None) -> None:
+        if self.stop_event is not None:
+            self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout)
+
+
+def bootstrap_engine(
+    control_plane_url: str,
+    agent_secret: str,
+    *,
+    policy_dir: str | Path,
+    entities_path: str | Path | None = None,
+    persist_policy_dir: str | Path | None = None,
+    pep_key_path: str | Path | None = None,
+    mode: str = "enforce",
+    version: str = "",
+    poller_name: str = "bundle-poll",
+    on_bundle: Callable[[dict[str, str]], None] | None = None,
+    start_poller: bool = True,
+) -> Bootstrap:
+    """Register identity, pull the bundle, start the background poller.
+
+    THE single implementation of "become a control-plane-governed PEP".
+    Every enforcement point shares it -- parapetai_agent.maf's
+    build_middleware() for the MAF adapter, and Governor.from_control_plane()
+    for the framework-neutral embed path. Written once because a second copy
+    is a second set of failure semantics: if one entry point fell back to
+    disk on an unreachable control plane and another crashed, "the agent
+    acts as configured" would mean different things depending on which
+    integration a customer happened to pick.
+
+    STALENESS/OUTAGE BEHAVIOUR (the reason this is worth centralising):
+
+      * `persist_policy_dir` set -- a synchronous fetch writes the bundle
+        there, THEN the engine is built from it. poll_once() logs and
+        returns on a fetch failure rather than raising, so an unreachable
+        control plane on a cold start degrades to THE LAST BUNDLE ON DISK
+        and keeps enforcing it. With nothing on disk yet, PolicyEngine's
+        own constructor raises (no .cedar files) -- fail closed, because
+        there is genuinely no policy to enforce.
+      * `persist_policy_dir` omitted -- the engine is built from
+        `policy_dir` first (a local default) so it is already enforcing
+        something real, then the fetched bundle is applied IN MEMORY
+        (persist_to_disk=False). Nothing is written to the adopter's disk.
+
+    Either way the background poller keeps re-applying on its own cycle, so
+    a control plane that comes back is picked up without a restart.
+    """
+    from parapetai_agent.policy.engine import PolicyEngine as _PolicyEngine
+
+    resolved_policy_dir = Path(policy_dir)
+    resolved_entities = Path(entities_path) if entities_path else None
+
+    # Ed25519 identity, registered BEFORE the first poll -- the control
+    # plane rejects an unknown PEP, so this has to come first.
+    private_key = ensure_pep_identity(
+        control_plane_url,
+        agent_secret,
+        pep_key_path,
+        persist=pep_key_path is not None,
+    )
+
+    if persist_policy_dir is not None:
+        poll_once(
+            control_plane_url,
+            agent_secret,
+            persist_policy_dir,
+            None,
+            private_key=private_key,
+            on_bundle=on_bundle,
+        )
+        resolved_policy_dir = Path(persist_policy_dir)
+        candidate = resolved_policy_dir / "entities.json"
+        resolved_entities = candidate if candidate.exists() else None
+
+    engine = _PolicyEngine(resolved_policy_dir, resolved_entities)
+
+    if persist_policy_dir is None:
+        poll_once(
+            control_plane_url,
+            agent_secret,
+            None,
+            None,
+            engine=engine,
+            private_key=private_key,
+            persist_to_disk=False,
+            on_bundle=on_bundle,
+        )
+
+    if not start_poller:
+        return Bootstrap(engine=engine, private_key=private_key)
+
+    # Heartbeat immediately so the PEP appears in the fleet table with its
+    # REAL generation/digest, rather than only after the first poll cycle.
+    send_heartbeat(
+        control_plane_url,
+        agent_secret,
+        pep_id=default_pep_id(),
+        version=version,
+        policy_generation=engine.status["generation"],
+        bundle_digest=engine.status["digest"],
+        mode=mode,
+        private_key=private_key,
+    )
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=run_bundle_poller,
+        args=(control_plane_url, agent_secret, persist_policy_dir),
+        kwargs={
+            "engine": engine,
+            "pep_id": default_pep_id(),
+            "version": version,
+            "mode": mode,
+            "stop_event": stop_event,
+            "private_key": private_key,
+            "key_path": pep_key_path,
+            "persist_to_disk": persist_policy_dir is not None,
+            "on_bundle": on_bundle,
+        },
+        daemon=True,
+        name=poller_name,
+    )
+    thread.start()
+    return Bootstrap(engine=engine, private_key=private_key, stop_event=stop_event, thread=thread)

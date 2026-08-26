@@ -2297,9 +2297,15 @@ class TestBuildMiddlewareIdentityRegistry:
         # races this test's assertion (flaky "assert 2 == 1" under load). The
         # construction-time synchronous poll_once is untouched, so the counts
         # below reflect construction alone.
-        import parapetai_agent.maf as maf_module
+        #
+        # Patched on parapetai_agent.control_plane, not on maf: the poller is
+        # started inside control_plane.bootstrap_engine (shared with
+        # Governor.from_control_plane) and resolves the name in its OWN
+        # module, so patching maf's namespace would silently miss and let the
+        # real daemon thread race this assertion again.
+        import parapetai_agent.control_plane as cp_module
 
-        monkeypatch.setattr(maf_module, "run_bundle_poller", lambda *a, **k: None)
+        monkeypatch.setattr(cp_module, "run_bundle_poller", lambda *a, **k: None)
 
         policy_dir = tmp_path / "policies"
         route = respx.get("https://cp.example/api/v1/bundle").mock(

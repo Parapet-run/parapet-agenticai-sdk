@@ -198,7 +198,6 @@ import os
 import threading
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Literal
 
@@ -228,13 +227,7 @@ import parapetai_agent.policy as parapetai_agent_policy
 from parapetai_agent import pep_identity
 from parapetai_agent._exceptions import GovernanceDenied
 from parapetai_agent.content_checks import ContentCheckConfig
-from parapetai_agent.control_plane import (
-    default_pep_id,
-    ensure_pep_identity,
-    poll_once,
-    run_bundle_poller,
-    send_heartbeat,
-)
+from parapetai_agent.control_plane import bootstrap_engine, sdk_version
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.otel import openinference as oi
@@ -1707,11 +1700,11 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 context.result = transform(context.result)
 
 
-def _installed_version() -> str:
-    try:
-        return version("parapetai-gateway")
-    except PackageNotFoundError:
-        return "0.0.0-dev"
+# _installed_version() used to live here and asked importlib.metadata for
+# "parapetai-gateway" -- a copy-paste of the gateway's own identical helper,
+# where that name is right. In an embedded SDK the gateway package is normally
+# absent, so every SDK PEP heartbeat reported "0.0.0-dev". Replaced by
+# control_plane.sdk_version(), which reports this package; see its docstring.
 
 
 @dataclass(slots=True)
@@ -2026,7 +2019,6 @@ def build_middleware(
         if cached is not None:
             return cached.chat_mw, cached.func_mw
 
-        private_key = None
         # None (not default_key_path()) when persist_pep_key=False -- a
         # real path here would be misleading (nothing is ever written to
         # it) and run_bundle_poller's own rotate_key handling already
@@ -2062,90 +2054,36 @@ def build_middleware(
             groundedness.load_from_bundle(files)
             judge.load_from_bundle(files)
 
-        if control_plane_configured:
-            assert resolved_control_plane_url and resolved_agent_secret  # narrows for mypy
-            # Ed25519 identity, loaded/created and registered before the
-            # first poll_once() -- see parapetai_agent.control_plane.ensure_pep_identity.
-            private_key = ensure_pep_identity(
-                resolved_control_plane_url,
-                resolved_agent_secret,
-                resolved_pep_key_path,
-                persist=persist_pep_key,
-            )
-            if persist_policy_dir is not None:
-                # Original behavior: sync-fetch-and-write BEFORE
-                # constructing PolicyEngine, then read from the same
-                # place just written -- fails closed (raises) if this
-                # first fetch fails with nothing there yet.
-                poll_once(
-                    resolved_control_plane_url,
-                    resolved_agent_secret,
-                    persist_policy_dir,
-                    None,
-                    private_key=private_key,
-                    on_bundle=_load_bundle_configs,
-                )
-                resolved_policy_dir = Path(persist_policy_dir)
-                candidate = resolved_policy_dir / "entities.json"
-                resolved_entities_path = candidate if candidate.exists() else None
-
-        engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
-
-        if control_plane_configured and persist_policy_dir is None:
-            assert resolved_control_plane_url and resolved_agent_secret
-            # No disk target -- construct from resolved_policy_dir first
-            # (the bundled default, or an explicit local override) so the
-            # engine is already enforcing something real, then apply the
-            # real bundle directly to it in memory. poll_once() is
-            # best-effort here (logs and returns on failure, never
-            # raises) -- an unreachable control plane on a cold start
-            # means this keeps serving resolved_policy_dir's policies
-            # instead of crashing the process, picked up by the
-            # background poller below on its next successful cycle.
-            poll_once(
-                resolved_control_plane_url,
-                resolved_agent_secret,
-                None,
-                None,
-                engine=engine,
-                private_key=private_key,
-                persist_to_disk=False,
-                on_bundle=_load_bundle_configs,
-            )
-
         stop_event: threading.Event | None = None
         poll_thread: threading.Thread | None = None
         if control_plane_configured:
-            assert resolved_control_plane_url and resolved_agent_secret
-            send_heartbeat(
+            assert resolved_control_plane_url and resolved_agent_secret  # narrows for mypy
+            # Identity registration, first fetch, disk-vs-memory choice,
+            # heartbeat and poller thread all live in ONE place now
+            # (parapetai_agent.control_plane.bootstrap_engine), shared with
+            # Governor.from_control_plane(). Two copies meant two sets of
+            # outage semantics, so "the agent acts as configured" could mean
+            # something different depending on which integration a customer
+            # picked. Behaviour here is unchanged -- see that function's
+            # docstring for the persist_policy_dir / in-memory split this
+            # used to spell out inline.
+            boot = bootstrap_engine(
                 resolved_control_plane_url,
                 resolved_agent_secret,
-                pep_id=default_pep_id(),
-                version=_installed_version(),
-                policy_generation=engine.status["generation"],
-                bundle_digest=engine.status["digest"],
+                policy_dir=resolved_policy_dir,
+                entities_path=resolved_entities_path,
+                persist_policy_dir=persist_policy_dir,
+                pep_key_path=resolved_pep_key_path,
                 mode="enforce",  # build_middleware always enforces; no monitor-only mode here
-                private_key=private_key,
+                version=sdk_version(),
+                poller_name=f"bundle-poll-{resolved_agent_id}",
+                on_bundle=_load_bundle_configs,
             )
-            stop_event = threading.Event()
-            poll_thread = threading.Thread(
-                target=run_bundle_poller,
-                args=(resolved_control_plane_url, resolved_agent_secret, persist_policy_dir),
-                kwargs={
-                    "engine": engine,
-                    "pep_id": default_pep_id(),
-                    "version": _installed_version(),
-                    "mode": "enforce",
-                    "stop_event": stop_event,
-                    "private_key": private_key,
-                    "key_path": resolved_pep_key_path,
-                    "persist_to_disk": persist_policy_dir is not None,
-                    "on_bundle": _load_bundle_configs,
-                },
-                daemon=True,
-                name=f"bundle-poll-{resolved_agent_id}",
-            )
-            poll_thread.start()
+            engine = boot.engine
+            stop_event = boot.stop_event
+            poll_thread = boot.thread
+        else:
+            engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
 
         caller = Caller(agent_id=resolved_agent_id, tenant=tenant)
         chat_mw = ParapetChatMiddleware(

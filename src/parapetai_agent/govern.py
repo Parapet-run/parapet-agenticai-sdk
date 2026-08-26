@@ -27,9 +27,13 @@ from __future__ import annotations
 
 import functools
 import inspect
+import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from parapetai_agent.control_plane import Bootstrap
 
 from parapetai_agent._exceptions import GovernanceDenied
 from parapetai_agent.content_checks import ContentCheckConfig
@@ -74,6 +78,10 @@ class Governor:
         self._content_checks = content_checks
         self._groundedness = groundedness
         self._judge = judge
+        # Set only by from_control_plane(), which owns a poller thread. None
+        # for every locally-constructed Governor, so stop_sync() is safe to
+        # call regardless of how this was built.
+        self._bootstrap: Bootstrap | None = None
 
     # ------------------------------------------------------------------ #
     # constructors
@@ -107,6 +115,114 @@ class Governor:
             judge=jd,
             on_decision=on_decision,
         )
+
+    @classmethod
+    def from_control_plane(
+        cls,
+        control_plane_url: str | None = None,
+        agent_secret: str | None = None,
+        *,
+        policy_dir: str | Path,
+        entities_path: str | Path | None = None,
+        persist_policy_dir: str | Path | None = None,
+        pep_key_path: str | Path | None = None,
+        agent_id: str | None = None,
+        tenant: str = "default",
+        mode: str = "enforce",
+        caller: Caller | None = None,
+        on_decision: OnDecision | None = None,
+    ) -> Governor:
+        """Govern from CONTROL-PLANE-authored policy, refreshed in the
+        background -- the framework-neutral equivalent of what
+        `parapetai_agent.maf.build_middleware(control_plane_url=..., agent_secret=...)`
+        does for MAF.
+
+        Without this, the only way to get control-plane policy into an
+        embedded agent was the MAF adapter, and every other framework
+        (LangGraph, CrewAI, the OpenAI Agents SDK, a plain loop) was stuck on
+        `from_policy_dir()` -- policy files the adopter maintains themselves,
+        which is not governed by the control plane at all. That gap made the
+        product promise ("policy is defined in the control plane; the agent
+        syncs so it acts as configured") true for exactly one framework.
+
+        Fetches the signed bundle, applies it, and starts the background
+        poller so later edits and approvals land without a restart. Every
+        decision is still evaluated LOCALLY, in-process -- the control plane
+        is never on the decision path, so it can be down without blocking a
+        single call.
+
+        ON AN UNREACHABLE CONTROL PLANE it degrades to the last bundle on
+        disk rather than refusing to start (see
+        control_plane.bootstrap_engine for the exact semantics) -- an outage
+        on our side must not take a customer's agent down. With `policy_dir`
+        empty and nothing yet persisted there is no policy to enforce at all,
+        and PolicyEngine's constructor raises: fail closed.
+
+        `control_plane_url`/`agent_secret` fall back to
+        PARAPETAI_CONTROL_PLANE_URL / PARAPETAI_AGENT_SECRET, matching
+        build_middleware, so the same env that configures a MAF agent
+        configures this one.
+
+        The returned Governor owns a daemon poller thread; call
+        `.stop_sync()` to end it (tests, or a process that constructs many).
+        """
+        from parapetai_agent.control_plane import bootstrap_engine, sdk_version
+
+        url = control_plane_url or os.environ.get("PARAPETAI_CONTROL_PLANE_URL")
+        secret = agent_secret or os.environ.get("PARAPETAI_AGENT_SECRET")
+        if not url or not secret:
+            raise RuntimeError(
+                "Governor.from_control_plane needs a control plane URL and agent secret "
+                "(arguments, or PARAPETAI_CONTROL_PLANE_URL / PARAPETAI_AGENT_SECRET). "
+                "Use Governor.from_policy_dir() for local or air-gapped policy."
+            )
+
+        # Constructed unconditionally, then populated from every fetched
+        # bundle -- same contract as build_middleware: an SDK new enough to
+        # have these modules enforces whatever config its bundle carries,
+        # with no extra flag for an adopter to remember to set.
+        cc, gr, jd = ContentCheckConfig(), GroundednessConfig(), JudgeConfig()
+
+        def _load_bundle_configs(files: dict[str, str]) -> None:
+            # All three refresh from the SAME bundle on every poll, so the
+            # input scanners and output evals stay in lockstep with policy.
+            cc.load_from_bundle(files)
+            gr.load_from_bundle(files)
+            jd.load_from_bundle(files)
+
+        resolved_agent_id = agent_id or os.environ.get("PARAPETAI_AGENT_ID") or "agent"
+        boot = bootstrap_engine(
+            url,
+            secret,
+            policy_dir=policy_dir,
+            entities_path=entities_path,
+            persist_policy_dir=persist_policy_dir,
+            pep_key_path=pep_key_path,
+            mode=mode,
+            # Same value the MAF adapter sends, so the fleet table reports a
+            # PEP's SDK build identically however the customer embedded it.
+            version=sdk_version(),
+            poller_name=f"bundle-poll-{resolved_agent_id}",
+            on_bundle=_load_bundle_configs,
+        )
+        governor = cls(
+            boot.engine,
+            caller=caller or Caller(agent_id=resolved_agent_id, tenant=tenant),
+            content_checks=cc,
+            groundedness=gr,
+            judge=jd,
+            on_decision=on_decision,
+        )
+        governor._bootstrap = boot
+        return governor
+
+    def stop_sync(self, timeout: float | None = None) -> None:
+        """Stop the background bundle poller, if this Governor started one.
+        A no-op for a Governor built from local policy -- so a caller can
+        always call it without knowing which constructor was used."""
+        if self._bootstrap is not None:
+            self._bootstrap.stop(timeout)
+            self._bootstrap = None
 
     # ------------------------------------------------------------------ #
     # the three decisions
