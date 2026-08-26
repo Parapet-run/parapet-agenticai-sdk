@@ -112,10 +112,6 @@ for the full reasoning.
 - No `run_live()` (BIDI/audio) support -- only `run()`/`run_async()`'s
   `NONE`/`SSE` streaming modes are handled; a live/bidi turn is ungoverned
   by this plugin as of this writing.
-- Provider is always resolved as `"gemini"` (matching
-  `providers.parsers.GeminiParser` and `maf.py`'s own
-  `GeminiChatClient -> "gemini"` convention) -- ADK's own support for
-  routing non-Gemini models through LiteLlm is not distinguished here.
 """
 
 from __future__ import annotations
@@ -210,14 +206,44 @@ def _log_content_enabled() -> bool:
     return os.environ.get("PARAPETAI_OTEL_LOG_CONTENT", "false").lower() == "true"
 
 
+# LiteLlm prefixes whose spelling differs from the provider vocabulary the
+# rest of this SDK uses (parapetai_agent.maf's _PROVIDER_BY_CLIENT_CLASS,
+# providers.parsers). Deliberately tiny: anything not listed passes through
+# as-is, so a LiteLlm provider we have never heard of becomes its own
+# Resource:: value rather than being mapped onto a wrong one.
+_LITELLM_PREFIX_ALIASES = {
+    "azure_ai": "azure",
+    "vertex_ai": "vertex",
+}
+
+
 def provider_for_request(llm_request: LlmRequest) -> str:
-    """ADK's own model client is Google's genai SDK -- always "gemini",
-    matching providers.parsers.GeminiParser's convention and
-    parapetai_agent.maf's own GeminiChatClient -> "gemini" mapping. See
-    this module's docstring's "Known gaps" section for the LiteLlm
-    caveat."""
-    del llm_request  # unused for now -- kept as a parameter for the LiteLlm follow-up
-    return "gemini"
+    """The provider actually being called, not the framework calling it.
+
+    This returned a hardcoded "gemini" for every request, which was correct
+    only for ADK's native path (Google's genai SDK). ADK also routes to other
+    providers through its LiteLlm wrapper, and those decisions were labelled
+    `gemini` too -- so a decision against Claude carried `Resource::"gemini"`
+    and a rule written `resource == Resource::"anthropic"` silently never
+    matched. A policy that does not fire and does not warn is the worst
+    failure this engine can have, which is why this is no longer deferred.
+
+    LiteLlm puts the provider in the model string as a `provider/model`
+    prefix -- `anthropic/claude-haiku-4-5` -- and ADK passes that through to
+    `LlmRequest.model` verbatim (verified against google-adk 2.7.1, not
+    assumed). A model name with NO prefix is ADK's native path, which really
+    is Gemini.
+
+    Unknown prefixes pass through rather than collapsing to "unknown": LiteLlm
+    supports well over a hundred providers and an unrecognised one is far
+    better expressed as its own resource than silently merged into another's.
+    """
+    model = getattr(llm_request, "model", None) or ""
+    prefix, separator, _ = str(model).partition("/")
+    if not separator:
+        return "gemini"
+    prefix = prefix.strip().lower()
+    return _LITELLM_PREFIX_ALIASES.get(prefix, prefix) or "gemini"
 
 
 def _extract_texts(value: Any) -> list[str]:
@@ -392,6 +418,12 @@ class _ModelCorrelation:
     docstring)."""
 
     model: str | None = None
+    # The provider the model call actually went to. Carried here because the
+    # tool callbacks see only a ToolContext -- there is no LlmRequest to read
+    # it off -- and a tool call belongs to whichever provider's model asked
+    # for it. Defaults to gemini for the same reason provider_for_request
+    # does: a bare model name is ADK's native path.
+    provider: str = "gemini"
     span: Span | None = None
     span_context: SpanContext | None = None
     principal: str = ""
@@ -436,6 +468,15 @@ class ParapetPlugin(BasePlugin):
         self._trust_session_user_id = trust_session_user_id
         self._model_correlations: dict[str, _ModelCorrelation] = {}
         self._tool_spans: dict[tuple[str, str], Span] = {}
+        # Provider per invocation, kept SEPARATELY from _model_correlations
+        # because after_model_callback pops the correlation as soon as the
+        # model responds -- which is BEFORE the tool calls that response
+        # asked for. Reading the provider off the correlation therefore
+        # always hit its default on the tool path, which is how the
+        # hardcoded "gemini" survived its first removal. Cleaned up in
+        # after_run_callback, so a long-running server does not grow one
+        # entry per invocation.
+        self._provider_by_invocation: dict[str, str] = {}
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
@@ -459,6 +500,8 @@ class ParapetPlugin(BasePlugin):
             identity_roles=identity_roles,
             stream=stream,
         )
+        correlation.provider = provider_for_request(llm_request)
+        self._provider_by_invocation[invocation_id] = correlation.provider
         self._model_correlations[invocation_id] = correlation
 
         texts = _extract_texts(
@@ -546,7 +589,7 @@ class ParapetPlugin(BasePlugin):
                     _set_oi_attributes(span, {oi.LLM_OUTPUT_MESSAGES: accumulated})
 
             response_snapshot = Snapshot(
-                provider="gemini",
+                provider=correlation.provider,
                 endpoint="in-process:adk:model_call",
                 model=correlation.model,
                 parsed=True,
@@ -589,6 +632,7 @@ class ParapetPlugin(BasePlugin):
                 tool_context.user_id, trust_session_user_id=self._trust_session_user_id
             ),
             identity_roles=_resolved_identity_roles(),
+            provider=self._provider_by_invocation.get(invocation_id, "gemini"),
         )
 
         parent_ctx = _parent_context_from_span_context(correlation.span_context)
@@ -599,7 +643,7 @@ class ParapetPlugin(BasePlugin):
             _set_oi_attributes(span, {oi.TOOL_PARAMETERS: json.dumps(tool_args, default=str)})
 
         snapshot = Snapshot(
-            provider="gemini",
+            provider=correlation.provider,
             endpoint="in-process:adk:tool_call",
             model=correlation.model,
             parsed=True,
@@ -632,12 +676,13 @@ class ParapetPlugin(BasePlugin):
                 tool_context.user_id, trust_session_user_id=self._trust_session_user_id
             ),
             identity_roles=_resolved_identity_roles(),
+            provider=self._provider_by_invocation.get(invocation_id, "gemini"),
         )
         try:
             if span is not None and _log_content_enabled():
                 _set_oi_attributes(span, {oi.OUTPUT_VALUE: json.dumps(result, default=str)})
             response_snapshot = Snapshot(
-                provider="gemini",
+                provider=correlation.provider,
                 endpoint="in-process:adk:tool_call",
                 model=correlation.model,
                 parsed=True,
@@ -676,6 +721,7 @@ class ParapetPlugin(BasePlugin):
         producing one) -- without this, that invocation's correlation entry
         and open span would leak for the lifetime of the process in a
         long-running server."""
+        self._provider_by_invocation.pop(invocation_context.invocation_id, None)
         correlation = self._model_correlations.pop(invocation_context.invocation_id, None)
         if correlation is not None and correlation.span is not None:
             correlation.span.end()

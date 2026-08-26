@@ -116,6 +116,16 @@ class _FakeCallbackContext:
         self.run_config = _FakeRunConfig(StreamingMode.SSE if streaming else StreamingMode.NONE)
 
 
+class _FakeInvocationContext:
+    """Duck-typed stand-in for google.adk.agents.invocation_context.InvocationContext.
+
+    after_run_callback reads only invocation_id off it.
+    """
+
+    def __init__(self, *, invocation_id: str) -> None:
+        self.invocation_id = invocation_id
+
+
 class _FakeToolContext:
     """Duck-typed stand-in for google.adk.tools.tool_context.ToolContext."""
 
@@ -132,7 +142,9 @@ class _FakeTool:
         self.name = name
 
 
-def _llm_request(text: str = "hello", *, tools: list[str] | None = None) -> LlmRequest:
+def _llm_request(
+    text: str = "hello", *, tools: list[str] | None = None, model: str = "gemini-2.5-flash"
+) -> LlmRequest:
     config = types.GenerateContentConfig()
     if tools:
         config.tools = [
@@ -141,7 +153,7 @@ def _llm_request(text: str = "hello", *, tools: list[str] | None = None) -> LlmR
             )
         ]
     return LlmRequest(
-        model="gemini-2.5-flash",
+        model=model,
         contents=[types.Content(role="user", parts=[types.Part(text=text)])],
         config=config,
     )
@@ -155,8 +167,45 @@ def _llm_response(text: str, *, partial: bool = False) -> LlmResponse:
 
 
 class TestProviderIdentification:
-    def test_always_gemini(self) -> None:
+    """The provider is the one actually called, not the framework calling it.
+
+    This returned a hardcoded "gemini" for every request. ADK routes to other
+    providers through its LiteLlm wrapper, so a decision against Claude
+    carried `Resource::"gemini"` and a rule written
+    `resource == Resource::"anthropic"` silently never matched -- a policy
+    that does not fire and does not warn.
+    """
+
+    def test_a_bare_model_name_is_adks_native_gemini_path(self) -> None:
         assert provider_for_request(_llm_request()) == "gemini"
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("anthropic/claude-haiku-4-5", "anthropic"),
+            ("openai/gpt-4o", "openai"),
+            ("gemini/gemini-2.5-flash", "gemini"),
+            ("azure_ai/gpt-4o", "azure"),
+            ("vertex_ai/gemini-2.5-flash", "vertex"),
+        ],
+    )
+    def test_a_litellm_prefix_names_the_real_provider(self, model: str, expected: str) -> None:
+        assert provider_for_request(_llm_request(model=model)) == expected
+
+    def test_an_unknown_prefix_becomes_its_own_provider(self) -> None:
+        """LiteLlm supports well over a hundred providers. An unrecognised one
+        is far better expressed as its own resource than silently merged into
+        another's -- merging is exactly the bug this class exists to prevent."""
+        assert provider_for_request(_llm_request(model="groq/llama-3.3-70b")) == "groq"
+
+    def test_the_prefix_is_normalised(self) -> None:
+        assert provider_for_request(_llm_request(model="Anthropic/claude-haiku-4-5")) == "anthropic"
+
+    def test_a_missing_or_empty_model_does_not_raise(self) -> None:
+        """Computed on every model call, including error paths. Raising here
+        would turn a governed request into a crash."""
+        assert provider_for_request(_llm_request(model="")) == "gemini"
+        assert provider_for_request(_llm_request(model="/leading-slash")) == "gemini"
 
 
 class TestSnapshotBuilders:
@@ -332,6 +381,73 @@ class TestStreamingAccumulation:
         )
         # Correlation (and its open span) cleaned up after the final chunk.
         assert "inv-6" not in plugin._model_correlations
+
+
+class TestProviderReachesTheToolPath:
+    """The tool path is where the hardcoded provider survived its first removal.
+
+    after_model_callback pops the correlation as soon as the model responds --
+    which is BEFORE the tool calls that response asked for. So reading the
+    provider off the correlation always hit its default on the tool path, and
+    tool decisions kept reporting `gemini` while model decisions had already
+    been fixed. Caught by running a real ADK agent, not by the unit tests that
+    covered provider_for_request alone.
+    """
+
+    async def test_a_tool_call_inherits_the_provider_of_the_model_that_asked_for_it(
+        self,
+    ) -> None:
+        engine, caller = _engine_and_caller()
+        plugin = ParapetPlugin(engine, caller)
+        cb = _FakeCallbackContext(invocation_id="inv-prov")
+
+        await plugin.before_model_callback(
+            callback_context=cb, llm_request=_llm_request(model="anthropic/claude-haiku-4-5")
+        )
+        # The model turn ends and the correlation is discarded...
+        await plugin.after_model_callback(
+            callback_context=cb, llm_response=_llm_response("calling a tool")
+        )
+        assert "inv-prov" not in plugin._model_correlations
+
+        # ...and the SNAPSHOT the tool call is evaluated against must still
+        # carry it. Asserting on _provider_by_invocation instead would pass
+        # even with the tool path reading the popped correlation -- verified
+        # by deleting that line, which left this file green until this
+        # assertion looked at the decision rather than the plumbing.
+        seen: list[str] = []
+        real_evaluate = plugin.hook.evaluate
+
+        def _spy(*args: object, **kwargs: object):  # noqa: ANN202
+            snapshot = kwargs.get("snapshot")
+            if snapshot is not None:
+                seen.append(snapshot.provider)
+            return real_evaluate(*args, **kwargs)  # type: ignore[arg-type]
+
+        plugin.hook.evaluate = _spy  # type: ignore[method-assign]
+        await plugin.before_tool_callback(
+            tool=_FakeTool("get_weather"),
+            tool_args={"city": "nyc"},
+            tool_context=_FakeToolContext(invocation_id="inv-prov"),
+        )
+        assert seen == ["anthropic"]
+
+    async def test_the_provider_map_does_not_leak_across_invocations(self) -> None:
+        """One entry per invocation in a long-running server is a leak, which
+        is why the correlation is popped in the first place."""
+        engine, caller = _engine_and_caller()
+        plugin = ParapetPlugin(engine, caller)
+        cb = _FakeCallbackContext(invocation_id="inv-leak")
+
+        await plugin.before_model_callback(
+            callback_context=cb, llm_request=_llm_request(model="openai/gpt-4o")
+        )
+        assert plugin._provider_by_invocation
+
+        await plugin.after_run_callback(
+            invocation_context=_FakeInvocationContext(invocation_id="inv-leak")
+        )
+        assert not plugin._provider_by_invocation
 
 
 class TestToolCallSyntheticContext:
