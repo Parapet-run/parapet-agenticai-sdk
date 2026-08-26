@@ -9,7 +9,14 @@ on:
 jobs:
   pypi:
     runs-on: ubuntu-latest
-    environment: pypi                 # optional: add a protection rule in repo settings
+    # This name is NOT cosmetic and NOT free to rename. GitHub puts it in the
+    # OIDC token as the `environment` claim, and PyPI compares it to the
+    # "Environment name" on the trusted publisher as an exact string. A
+    # mismatch fails the publish with `invalid-publisher`: valid token, but no
+    # corresponding publisher -- which reads like a missing publisher rather
+    # than a one-word disagreement, and cost us a release cycle to spot.
+    # Change it here only together with the PyPI publisher config below.
+    environment: release
     permissions:
       id-token: write                 # required for PyPI Trusted Publishing (OIDC)
     steps:
@@ -36,9 +43,18 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # No token needed: uses OIDC Trusted Publishing.
-        # One-time setup on PyPI -> parapetai-agent -> Publishing:
-        #   Add a trusted publisher:
-        #     Owner:       Parapet-run
-        #     Repository:  parapet-agenticai-sdk
-        #     Workflow:    release.yml
-        #     Environment: pypi
+        #
+        # One-time setup, on the PROJECT (pypi.org -> Your projects ->
+        # parapetai-agent -> Manage -> Publishing -> Add a new publisher).
+        # NOT the account-level "pending publisher" form: a pending publisher
+        # only claims a name that does not exist yet, so for a project that is
+        # already on PyPI it is stored and then silently never matches.
+        #
+        #     Owner:            Parapet-run
+        #     Repository:       parapet-agenticai-sdk
+        #     Workflow:         release.yml
+        #     Environment name: release      <- must equal `environment:` above
+        #
+        # All four are compared exactly against the OIDC token's claims. To see
+        # what a failing run actually sent:
+        #   gh run view <run-id> --log-failed | grep '^\s*\*'
