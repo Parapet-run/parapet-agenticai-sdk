@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2]
+
+No functional changes. Release-pipeline verification (tag → build → PyPI
+publish via Trusted Publishing).
+
+## [0.4.1]
+
+### Added
+- Framework integration examples (`maf_sample_01` through `maf_sample_07`,
+  `maf_cli`, `adk_sample_01`, `adk_webapp`, `ungoverned_vs_governed`) moved
+  into this repo from the control-plane repo, plus a new
+  `same_prompt_every_framework/` example: five frameworks, one Cedar rule,
+  the same two prompts, side by side.
+
+### Fixed
+- `adk.py`'s `provider_for_request()` reported `"gemini"` unconditionally.
+  It now reports the provider actually called.
+
+## [0.4.0]
+
+### Added
+- **Resolve a held REVIEW call.** `authorize_tool()` now raises
+  `GovernanceReviewRequired` with a ticket instead of only a plain deny;
+  `Governor.wait_for_approval()` is an opt-in blocking helper. A grant is
+  single-use and bound to one exact call via a content fingerprint —
+  approving one call can't be replayed onto another. See
+  `docs/adr/0009-approval-loop.md`.
+- **The gateway joins the approval loop.** A held call's ticket rides the
+  existing 403 refusal (`x-parapetai-review-id` header, or `error.data` for
+  MCP clients that never see headers); the client re-presents it on retry,
+  and the fingerprint is recomputed from the retried request body so an
+  approved call can't be swapped for a different one.
+
+### Fixed
+- The release workflow's `environment: release` name didn't match the PyPI
+  trusted-publisher config, failing publishes with `invalid-publisher`.
+
 ## [0.3.0]
 
 ### Added
