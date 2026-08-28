@@ -1,13 +1,33 @@
 name: release
 
 # Publish to PyPI when a version tag is pushed, e.g.:
-#   git tag v0.2.0 && git push origin v0.2.0
+#   git tag v0.2.0 && git push origin v0.2.0                (parapetai-agent)
+#   git tag mcp-v0.3.0 && git push origin mcp-v0.3.0         (parapetai-mcp)
+#
+# One workflow FILE, two jobs, gated by tag prefix -- not two separate
+# workflow files. This repo is a uv workspace with independently-versioned
+# packages (parapetai-agent, parapetai-mcp, ...), but PyPI's Trusted
+# Publisher registration is keyed on (repo, WORKFLOW FILENAME, environment),
+# not on which PyPI project is being published to -- the same GitHub identity
+# can be a trusted publisher for multiple PyPI projects at once. The
+# parapetai-mcp project's trusted-publisher entry was registered pointing at
+# this exact file (release.yml) and environment (release), matching
+# parapetai-agent's own -- so the mcp release job has to live HERE, not in a
+# same-named-elsewhere file, or its OIDC token's `workflow` claim would not
+# match what PyPI has on record.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "mcp-v*"]
 
 jobs:
   pypi:
+    # Only a "v*" tag -- NOT "mcp-v*" too, even though "v*" as a glob would
+    # otherwise look like it could match it. It can't: tag matching here is
+    # on the ref's actual first characters, and "mcp-v0.3.0" starts with
+    # "m", not "v", so the two prefixes never overlap. This `if` is a second,
+    # explicit guard on top of that fact -- cheap insurance against ever
+    # weakening the tag pattern above without re-deriving this reasoning.
+    if: startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     # This name is NOT cosmetic and NOT free to rename. GitHub puts it in the
     # OIDC token as the `environment` claim, and PyPI compares it to the
@@ -58,3 +78,50 @@ jobs:
         # All four are compared exactly against the OIDC token's claims. To see
         # what a failing run actually sent:
         #   gh run view <run-id> --log-failed | grep '^\s*\*'
+
+  pypi-mcp:
+    # Mirror image of the `pypi` job's guard above -- only an "mcp-v*" tag.
+    if: startsWith(github.ref_name, 'mcp-v')
+    runs-on: ubuntu-latest
+    # Registered on PyPI against the parapetai-mcp PROJECT specifically, with
+    # the SAME (repo, workflow filename, environment name) triple as the
+    # `pypi` job above -- see this file's top-of-file comment for why that's
+    # legitimate rather than a collision. Job name ("pypi-mcp") is not part
+    # of the OIDC claims PyPI checks and is free to be anything.
+    environment: release
+    permissions:
+      id-token: write                 # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # --package scoped to parapetai-mcp only -- same reasoning as the
+      # `pypi` job's build step: an unscoped `uv build` would also build
+      # parapetai-agent and parapetai-gateway into dist/, and the publish
+      # step below uploads dist/* wholesale.
+      - name: Build sdist + wheel (parapetai-mcp only)
+        run: uv build --package parapetai-mcp --out-dir dist
+
+      - name: Check the tag matches the package version
+        run: |
+          pkg=$(grep -m1 '^version' mcp-server/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          tag="${GITHUB_REF_NAME#mcp-v}"
+          echo "package=$pkg tag=$tag"
+          test "$pkg" = "$tag" || { echo "::error::tag mcp-v$tag != mcp-server/pyproject.toml version $pkg"; exit 1; }
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No token needed: uses OIDC Trusted Publishing.
+        #
+        # One-time setup, on the PROJECT (pypi.org -> Your projects ->
+        # parapetai-mcp -> Manage -> Publishing -> Add a new publisher):
+        #
+        #     Owner:            Parapet-run
+        #     Repository:       parapet-agenticai-sdk
+        #     Workflow:         release.yml
+        #     Environment name: release      <- must equal `environment:` above
+        #
+        # Same values as parapetai-agent's own trusted-publisher entry --
+        # that's expected, not a mistake; see this file's top-of-file comment.
