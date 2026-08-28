@@ -1,0 +1,12 @@
+[project]
+name = "parapet-quickdemo-adk"
+version = "0.1.0"
+description = "Parapet quickdemo: Sales vs HR identity-based tool access, Google ADK"
+requires-python = ">=3.12"
+dependencies = [
+    "parapetai-agent[adk]>=0.3,<1.0",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+package = false
