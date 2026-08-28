@@ -80,3 +80,16 @@ class ControlPlaneClient:
             resp.raise_for_status()
             result: dict[str, Any] = resp.json()
             return result
+
+    async def push_bundle_file(self, agent_id: str, filename: str, content: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(base_url=self.control_plane_url, timeout=10) as http:
+            resp = await http.post(
+                f"/api/v1/cli/agents/{agent_id}/bundle",
+                json={"filename": filename, "content": content},
+                headers=self._auth_headers(),
+            )
+            if resp.status_code == 403:
+                raise PermissionError(resp.json().get("detail", "not permitted to edit bundles"))
+            resp.raise_for_status()
+            result: dict[str, Any] = resp.json()
+            return result

@@ -127,5 +127,55 @@ async def parapet_list_agents(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL
     return {"agents": who["agents"]}
 
 
+@mcp.tool()
+async def parapet_push_policy_file(
+    agent_id: str,
+    filename: str,
+    content: str,
+    control_plane_url: str = DEFAULT_CONTROL_PLANE_URL,
+) -> dict[str, Any]:
+    """Write one Cedar policy file into an already-provisioned agent's
+    bundle (creates it if the filename is new, overwrites if it already
+    exists). Requires an owner/admin role -- a viewer's token gets a
+    PermissionError surfaced as {"error": ...}, same shape as every other
+    tool here. Use this instead of asking the human to paste policy into
+    the console by hand when you already generated the .cedar content
+    yourself (e.g. the parapet-quickdemo skill)."""
+    client = ControlPlaneClient(control_plane_url)
+    try:
+        return await client.push_bundle_file(agent_id, filename, content)
+    except NotLoggedInError as exc:
+        return {"error": str(exc)}
+    except PermissionError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.prompt()
+def parapet_getting_started() -> str:
+    """First-run menu for a newly connected Parapet MCP server -- surfaced
+    as a pickable starter prompt by clients that list MCP prompts (e.g.
+    Claude Code's /mcp menu). Not something this server can force onto the
+    very first turn of a conversation -- no MCP mechanism fires a prompt
+    automatically on connect -- so a client/skill that wants "ask before
+    doing anything" behavior should invoke this explicitly as its first
+    move, rather than assuming it already ran."""
+    return (
+        "Parapet is connected. What would you like to do?\n\n"
+        "1. Build an example governed-agent app -- a runnable demo with two "
+        "identities in different orgs (e.g. a Sales-org user and an HR-org "
+        "user) showing Cedar allow one org's tool and deny the other's, for "
+        "either Google ADK or Microsoft Agent Framework. (Use the "
+        "parapet-quickdemo skill for this.)\n"
+        "2. Something else -- available tools: parapet_login (device-code "
+        "auth), parapet_whoami (who you are + your existing agents), "
+        "parapet_provision_agent (create a new governed agent), "
+        "parapet_get_quickstart (this deployment's install command / env "
+        "vars / default model), parapet_list_agents, and "
+        "parapet_push_policy_file (write a Cedar policy into an agent's "
+        "bundle).\n\n"
+        "Which would you like -- build the example app, or something else?"
+    )
+
+
 def main() -> None:
     mcp.run(transport="stdio")
