@@ -47,20 +47,17 @@ If `parapet_whoami` returns an `error` (not logged in):
 Never ask the user to paste a token, an agent secret, or any other
 credential into the chat.
 
-## 2. Provision two agents
+## 2. Provision one agent
 
-Call `parapet_provision_agent` **twice**:
-1. `display_name="quickdemo-<framework>-governed"` — this is the one
-   the org policy gets pushed to (step 3).
-2. `display_name="quickdemo-<framework>-nogov"` — provisioned purely so
-   the ungoverned example also has a control-plane page to point at for
-   contrast (it never calls the control plane at runtime — this agent's
-   page will show zero decisions, which is itself the point: nothing was
-   enforced).
+Call `parapet_provision_agent` **once**, with
+`display_name="quickdemo-<framework>-governed"`. This is the only agent
+the demo needs — `example_no_governance.py` never calls the control
+plane at all (that's the point of the contrast), so a second, provisioned
+agent for it would have nothing to show on its page. Don't provision one.
 
-Each call returns `{agent_id, secret}` — **the secret is shown exactly
-once.** Write both straight into the generated `.env` in step 5; never
-just print them and move on.
+The call returns `{agent_id, secret}` — **the secret is shown exactly
+once.** Write it straight into the generated `.env` in step 5; never just
+print it and move on.
 
 ## 3. Push the org policy to the governed agent
 
@@ -93,11 +90,10 @@ generated project has no other way to learn them):
 
 | Placeholder in `.env.example` | Value |
 |---|---|
-| `PARAPETAI_AGENT_ID` | the **governed** agent's `agent_id` (step 2.1) |
-| `PARAPETAI_AGENT_SECRET` | the **governed** agent's `secret` (step 2.1) |
+| `PARAPETAI_AGENT_ID` | the agent's `agent_id` (step 2) |
+| `PARAPETAI_AGENT_SECRET` | the agent's `secret` (step 2) |
 | `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 1) |
 | `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 1 |
-| `PARAPETAI_AGENT_ID_NOGOV` | the **no-gov** agent's `agent_id` (step 2.2) |
 
 Leave `OPENAI_API_KEY` (MAF) / `GOOGLE_API_KEY` (ADK) unset — the mock
 model is the default and needs no key. Never write a real key into `.env`
@@ -117,10 +113,10 @@ uv sync   # or: python3 -m venv .venv && source .venv/bin/activate && pip instal
 uv run python driver.py
 ```
 
-Report the two control-plane links `driver.py` prints at the end — tell
-the user to click the governed agent's link to see the org policy, the
-allow/deny decisions, and the traces for themselves. This is the payoff;
-don't just say "it worked," point at where they can verify it.
+Report the control-plane link `driver.py` prints at the end — tell the
+user to click it to see the org policy, the allow/deny decisions, and
+the traces for themselves. This is the payoff; don't just say "it
+worked," point at where they can verify it.
 
 ## Non-negotiables
 

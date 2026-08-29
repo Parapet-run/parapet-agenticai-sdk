@@ -102,24 +102,11 @@ async def main() -> None:
             }
         )
 
-    print(
-        "QUICKDEMO_RESULT_JSON:"
-        + json.dumps(
-            {
-                "mode": mode,
-                "results": results,
-                # Provisioned only so this file has a control-plane page to
-                # point at too, for contrast with example_governed.py's --
-                # this script never calls the control plane or enforces
-                # anything, so that page will show zero decisions ever.
-                "agent_id": os.environ.get("PARAPETAI_AGENT_ID_NOGOV") or None,
-                "account_id": os.environ.get("PARAPETAI_ACCOUNT_ID") or None,
-                "control_plane_url": os.environ.get(
-                    "PARAPETAI_CONTROL_PLANE_URL", "https://app.parapet.run"
-                ),
-            }
-        )
-    )
+    # No agent_id/control_plane_url here -- this script never calls the
+    # control plane at all, unlike example_governed.py. One provisioned
+    # agent (the governed one) is enough for this demo; a second one
+    # purely to have a page to point at would never show anything on it.
+    print("QUICKDEMO_RESULT_JSON:" + json.dumps({"mode": mode, "results": results}))
 
 
 if __name__ == "__main__":

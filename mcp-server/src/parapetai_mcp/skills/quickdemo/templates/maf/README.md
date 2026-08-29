@@ -13,7 +13,7 @@ This demo runs the SAME agent both ways and shows the difference:
 |---|---|
 | `example_no_governance.py` | Plain `agent_framework.Agent`. Both people can call both tools. |
 | `example_governed.py` | `GovernedAgent`, same tools, same task. Cedar enforces org-scoped access — Tony gets Salesforce and is denied HR; Sally gets HR and is denied Salesforce. |
-| `driver.py` | Runs both, prints a side-by-side allow/deny table, prints the control-plane link for each agent. |
+| `driver.py` | Runs both, prints a side-by-side allow/deny table, prints the governed agent's control-plane link. |
 
 Nothing here needs a real LLM key or a real Salesforce/HR system —
 `mock_model_server.py` is a small local stand-in that both examples use by
@@ -97,6 +97,7 @@ uv run python example_governed.py
 
 Expected output (mock mode): the ungoverned run shows all four calls
 succeeding; the governed run shows Tony and Sally each denied on the
-other's tool. The final lines print each agent's control-plane URL —
-open it to see the policy, the allow/deny decisions, and the traces for
-yourself.
+other's tool. The final lines print the governed agent's control-plane
+URL — open it to see the policy, the allow/deny decisions, and the
+traces for yourself. (There's only one agent — `example_no_governance.py`
+never calls the control plane, so there's nothing to point at there.)

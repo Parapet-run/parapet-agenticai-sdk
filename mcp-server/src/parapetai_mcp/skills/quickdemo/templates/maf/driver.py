@@ -2,8 +2,10 @@
 subprocesses (each configures structlog/dotenv globally for itself --
 running them in-process would fight over that), parses the
 QUICKDEMO_RESULT_JSON: line each prints on its last line of stdout, and
-renders one side-by-side table plus the control-plane links for the
-governed agent.
+renders one side-by-side table plus the governed agent's control-plane
+link. Only the governed agent is provisioned -- example_no_governance.py
+never calls the control plane, so a second agent would have nothing to
+show.
 
 Usage:
     uv run python driver.py
@@ -63,15 +65,9 @@ def main() -> None:
         "the tool for their own org. That's Parapet."
     )
 
-    print("\n=== View each agent on the control plane ===")
-    if ungoverned.get("agent_id") and ungoverned.get("account_id"):
-        print(
-            f"no-governance agent (no policy enforced, no decisions logged): "
-            f"{ungoverned['control_plane_url']}/a/{ungoverned['account_id']}"
-            f"/agents/{ungoverned['agent_id']}"
-        )
+    print("\n=== View the governed agent on the control plane ===")
     print(
-        f"governed agent (org policy, allow/deny decisions, traces): "
+        f"org policy, allow/deny decisions, traces: "
         f"{governed['control_plane_url']}/a/{governed['account_id']}/agents/{governed['agent_id']}"
     )
 
