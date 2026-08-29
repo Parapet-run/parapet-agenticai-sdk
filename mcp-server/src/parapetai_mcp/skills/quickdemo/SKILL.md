@@ -29,7 +29,24 @@ improvise an integration that doesn't exist in `parapetai-agent`.)
 Also ask where to generate the project (a directory name/path) if the
 user hasn't already said.
 
-## 1. Check auth
+## 1. Check prerequisites
+
+Call `parapet_check_prerequisites`. If `all_ok` is `true`, say nothing
+about it and move straight to step 2 — this is a silent gate, not
+something to report on when nothing's wrong.
+
+If `all_ok` is `false`, stop here and switch to the
+**parapet-install-prereqs** skill's flow before doing anything else:
+report each `"ok": false` entry's `detail` and `install_cmd`, and ask
+before running any of them, one at a time (that skill — installed
+alongside this one at `../parapet-install-prereqs/SKILL.md` — has the
+exact wording and ordering rules, e.g. on macOS Homebrew has to succeed
+before `pipx`/`uv`'s own commands will). Re-run
+`parapet_check_prerequisites` after each approved install to confirm it
+actually flipped to `"ok": true` before moving on. Only continue to step
+2 of *this* skill once `all_ok` is `true`.
+
+## 2. Check auth
 
 Call `parapet_whoami`. All `parapet_*` tools default to the hosted control
 plane at `https://app.parapet.run` unless the MCP server was registered
@@ -47,7 +64,7 @@ If `parapet_whoami` returns an `error` (not logged in):
 Never ask the user to paste a token, an agent secret, or any other
 credential into the chat.
 
-## 2. Provision one agent
+## 3. Provision one agent
 
 Call `parapet_provision_agent` **once**, with
 `display_name="quickdemo-<framework>-governed"`. This is the only agent
@@ -56,10 +73,10 @@ plane at all (that's the point of the contrast), so a second, provisioned
 agent for it would have nothing to show on its page. Don't provision one.
 
 The call returns `{agent_id, secret}` — **the secret is shown exactly
-once.** Write it straight into the generated `.env` in step 5; never just
+once.** Write it straight into the generated `.env` in step 6; never just
 print it and move on.
 
-## 3. Push the org policy to the governed agent
+## 4. Push the org policy to the governed agent
 
 Read `templates/<framework>/policy/40-org.cedar` (next to this SKILL.md,
 in this skill's own installed directory — do not write this content from
@@ -75,13 +92,13 @@ is default-deny past that — the org-scoped forbid rules in this file are
 what makes Tony denied on `hr_lookup` and Sally denied on
 `salesforce_lookup`.
 
-## 4. Get the deployment's own config (optional, for a real model later)
+## 5. Get the deployment's own config (optional, for a real model later)
 
 Call `parapet_get_quickstart` if the user wants to know this deployment's
 default model / install string for the framework they picked. Not needed
-to run the demo itself — the demo mocks the model by default (step 6).
+to run the demo itself — the demo mocks the model by default (step 7).
 
-## 5. Generate the project
+## 6. Generate the project
 
 Read every file under `templates/<framework>/` (next to this SKILL.md)
 and write it into the target directory, unchanged, **except** `.env`:
@@ -90,10 +107,10 @@ generated project has no other way to learn them):
 
 | Placeholder in `.env.example` | Value |
 |---|---|
-| `PARAPETAI_AGENT_ID` | the agent's `agent_id` (step 2) |
-| `PARAPETAI_AGENT_SECRET` | the agent's `secret` (step 2) |
-| `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 1) |
-| `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 1 |
+| `PARAPETAI_AGENT_ID` | the agent's `agent_id` (step 3) |
+| `PARAPETAI_AGENT_SECRET` | the agent's `secret` (step 3) |
+| `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 2) |
+| `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 2 |
 
 Leave `OPENAI_API_KEY` (MAF) / `GOOGLE_API_KEY` (ADK) unset — the mock
 model is the default and needs no key. Never write a real key into `.env`
@@ -105,7 +122,7 @@ end to end (real framework, real mock model, real Cedar decisions against
 a live control plane) as part of this skill; the value they demonstrate
 depends on running unmodified.
 
-## 6. Run it
+## 7. Run it
 
 From the generated project directory:
 ```
