@@ -6,18 +6,18 @@ init   -- one-time setup in a target project: copies every packaged
           skill's full directory tree -- parapet-maf/, parapet-adk/,
           parapet-quickdemo/ (the last one also carries a templates/
           subdirectory the skill reads from at generation time, unlike
-          the first two which are a single SKILL.md) -- into
-          .claude/skills/, and prints the `claude mcp add` line to wire
-          this server in. Does NOT touch any file outside
-          .claude/skills/ -- instrumenting the project's own code is
-          the calling agent's job, guided by whichever skill actually
-          matches the project (agent_framework vs google.adk), not this
-          command's. All are installed unconditionally rather than this
-          command trying to detect which framework the target project
-          uses -- that detection belongs to the calling agent, which can
-          actually read the project's code; this command can't reliably
-          guess it from a bare directory path alone, and a wrong guess
-          would silently install only the wrong skill.
+          the others which are a single SKILL.md), parapet-install-
+          prereqs/ -- into .claude/skills/, and prints the `claude mcp
+          add` line to wire this server in. Does NOT touch any file
+          outside .claude/skills/ -- instrumenting the project's own
+          code is the calling agent's job, guided by whichever skill
+          actually matches the project (agent_framework vs google.adk),
+          not this command's. All are installed unconditionally rather
+          than this command trying to detect which framework the target
+          project uses -- that detection belongs to the calling agent,
+          which can actually read the project's code; this command can't
+          reliably guess it from a bare directory path alone, and a
+          wrong guess would silently install only the wrong skill.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import shutil
 import sys
 from pathlib import Path
 
-_SKILLS = ("maf", "adk", "quickdemo")
+_SKILLS = ("maf", "adk", "quickdemo", "install-prereqs")
 
 
 def _cmd_serve(_args: argparse.Namespace) -> None:
@@ -51,11 +51,13 @@ def _cmd_init(args: argparse.Namespace) -> None:
         print(f"Installed SKILL.md to {dest}")
     print()
     print(
-        "Three skills installed -- parapet-maf (Microsoft Agent Framework) and"
+        "Four skills installed -- parapet-maf (Microsoft Agent Framework) and"
         " parapet-adk (Google ADK) each retrofit an EXISTING project using that"
         " framework; parapet-quickdemo generates a new, runnable identity-based"
-        " governance demo from nothing. An agent picks whichever matches what"
-        " you're asking for, not from this command."
+        " governance demo from nothing; parapet-install-prereqs detects and"
+        " (with your per-step approval) installs Python/pipx/uv if any of the"
+        " others need them. An agent picks whichever matches what you're"
+        " asking for, not from this command."
     )
     print()
     print("Add this MCP server to Claude Code:")
@@ -73,9 +75,7 @@ def main(argv: list[str] | None = None) -> None:
     serve = sub.add_parser("serve", help="run the MCP server over stdio")
     serve.set_defaults(func=_cmd_serve)
 
-    init = sub.add_parser(
-        "init", help="install both parapet-maf/parapet-adk SKILL.md files into .claude/skills/"
-    )
+    init = sub.add_parser("init", help="install all packaged parapet-* skills into .claude/skills/")
     init.add_argument("project_dir", nargs="?", default=".")
     init.set_defaults(func=_cmd_init)
 

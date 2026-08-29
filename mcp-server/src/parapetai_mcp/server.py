@@ -12,6 +12,11 @@ never round-trips back through the calling model's context.
 from __future__ import annotations
 
 import asyncio
+import platform
+import re
+import shutil
+import subprocess
+import sys
 import webbrowser
 from typing import Any
 
@@ -150,6 +155,104 @@ async def parapet_push_policy_file(
         return {"error": str(exc)}
 
 
+def _python_check() -> dict[str, Any]:
+    # Checks real binaries on PATH, not this process's own interpreter --
+    # parapetai-mcp normally runs inside a pipx-managed venv, which says
+    # nothing about what a NEW venv (e.g. a generated quickdemo project)
+    # would resolve `python3`/`python3.12` to system-wide.
+    for candidate in ("python3.13", "python3.12", "python3"):
+        path = shutil.which(candidate)
+        if not path:
+            continue
+        try:
+            out = subprocess.run(  # noqa: S603 -- fixed candidate list, not untrusted input
+                [path, "--version"], capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(r"(\d+)\.(\d+)", out)
+        if not match:
+            continue
+        major, minor = int(match.group(1)), int(match.group(2))
+        ok = (major, minor) >= (3, 12)
+        return {"ok": ok, "detail": f"{out} ({candidate} at {path})"}
+    return {"ok": False, "detail": "no python3.12+ found on PATH"}
+
+
+def _which_check(binary: str) -> dict[str, Any]:
+    path = shutil.which(binary)
+    return {"ok": path is not None, "detail": path or f"{binary} not found on PATH"}
+
+
+@mcp.tool()
+def parapet_check_prerequisites() -> dict[str, Any]:
+    """Local machine check -- no control plane call, nothing sent anywhere --
+    for what every parapet-* skill assumes is already installed: Python
+    3.12+, pipx, and uv. Detects the real OS and (on Linux) which package
+    manager is actually present, so the returned install_cmd is never a
+    guess -- e.g. `apt` on a Fedora box would be wrong. Does NOT install
+    anything itself; report the results and ask before running any install
+    command yourself (see the parapet-install-prereqs skill)."""
+    system = platform.system()  # "Darwin" | "Linux" | "Windows"
+    checks: dict[str, dict[str, Any]] = {"python": _python_check()}
+
+    if system == "Darwin":
+        os_name = "macos"
+        checks["homebrew"] = _which_check("brew")
+        if not checks["homebrew"]["ok"]:
+            checks["homebrew"]["install_cmd"] = (
+                '/bin/bash -c "$(curl -fsSL '
+                'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            )
+        pipx_cmd = "brew install pipx && pipx ensurepath"
+        uv_cmd = "brew install uv"
+        python_cmd = "brew install python@3.12"
+    elif system == "Linux":
+        os_name = "linux"
+        if shutil.which("apt") or shutil.which("apt-get"):
+            pkg_mgr, python_cmd = (
+                "apt",
+                "sudo apt update && sudo apt install -y python3.12 python3.12-venv python3-pip",
+            )
+        elif shutil.which("dnf"):
+            pkg_mgr, python_cmd = "dnf", "sudo dnf install -y python3.12"
+        else:
+            pkg_mgr, python_cmd = None, "install Python 3.12+ via your distro's package manager"
+        checks["package_manager"] = {
+            "ok": pkg_mgr is not None,
+            "detail": pkg_mgr or "no apt/dnf found -- can't suggest an exact command",
+        }
+        pipx_cmd = "python3 -m pip install --user pipx && python3 -m pipx ensurepath"
+        uv_cmd = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    elif system == "Windows":
+        os_name = "windows"
+        checks["winget"] = _which_check("winget")
+        pipx_cmd = "py -m pip install --user pipx; py -m pipx ensurepath"
+        uv_cmd = (
+            'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
+        )
+        python_cmd = "winget install --id Python.Python.3.12"
+    else:  # pragma: no cover -- platform.system() only returns the three above in practice
+        os_name = system.lower()
+        pipx_cmd = uv_cmd = python_cmd = None
+
+    checks["pipx"] = _which_check("pipx")
+    checks["uv"] = _which_check("uv")
+    if not checks["python"]["ok"]:
+        checks["python"]["install_cmd"] = python_cmd
+    if not checks["pipx"]["ok"]:
+        checks["pipx"]["install_cmd"] = pipx_cmd
+    if not checks["uv"]["ok"]:
+        checks["uv"]["install_cmd"] = uv_cmd
+
+    return {
+        "os": os_name,
+        "python_executable": sys.executable,
+        "checks": checks,
+        "all_ok": all(c["ok"] for c in checks.values() if "ok" in c),
+    }
+
+
 @mcp.prompt()
 def parapet_getting_started() -> str:
     """First-run menu for a newly connected Parapet MCP server -- surfaced
@@ -166,14 +269,18 @@ def parapet_getting_started() -> str:
         "user) showing Cedar allow one org's tool and deny the other's, for "
         "either Google ADK or Microsoft Agent Framework. (Use the "
         "parapet-quickdemo skill for this.)\n"
-        "2. Something else -- available tools: parapet_login (device-code "
+        "2. Set up prerequisites -- check for Python 3.12+/pipx/uv and "
+        "install whatever's missing, one approved step at a time. (Use the "
+        "parapet-install-prereqs skill for this.)\n"
+        "3. Something else -- available tools: parapet_login (device-code "
         "auth), parapet_whoami (who you are + your existing agents), "
         "parapet_provision_agent (create a new governed agent), "
         "parapet_get_quickstart (this deployment's install command / env "
-        "vars / default model), parapet_list_agents, and "
+        "vars / default model), parapet_list_agents, "
         "parapet_push_policy_file (write a Cedar policy into an agent's "
-        "bundle).\n\n"
-        "Which would you like -- build the example app, or something else?"
+        "bundle), and parapet_check_prerequisites (local Python/pipx/uv "
+        "check).\n\n"
+        "Which would you like?"
     )
 
 

@@ -1,8 +1,8 @@
 [project]
 name = "parapetai-mcp"
-version = "0.3.1"
+version = "0.4.0"
 requires-python = ">=3.12"
-description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships three packaged skills: parapet-maf and parapet-adk (retrofit an existing project, one per framework integration) and parapet-quickdemo (generate a runnable identity-based governance demo from nothing)."
+description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships four packaged skills: parapet-maf and parapet-adk (retrofit an existing project, one per framework integration), parapet-quickdemo (generate a runnable identity-based governance demo from nothing), and parapet-install-prereqs (detect and, with per-step approval, install Python/pipx/uv)."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -58,3 +58,4 @@ packages = ["src/parapetai_mcp"]
 "src/parapetai_mcp/skills/quickdemo/templates/adk/example_governed.py" = "parapetai_mcp/skills/quickdemo/templates/adk/example_governed.py"
 "src/parapetai_mcp/skills/quickdemo/templates/adk/driver.py" = "parapetai_mcp/skills/quickdemo/templates/adk/driver.py"
 "src/parapetai_mcp/skills/quickdemo/templates/adk/policy/40-org.cedar" = "parapetai_mcp/skills/quickdemo/templates/adk/policy/40-org.cedar"
+"src/parapetai_mcp/skills/install-prereqs/SKILL.md" = "parapetai_mcp/skills/install-prereqs/SKILL.md"

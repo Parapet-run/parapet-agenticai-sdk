@@ -7,7 +7,7 @@ hand-editing env vars.
 
 ```
 pipx install parapetai-mcp
-parapetai-mcp init         # installs parapet-maf/ and parapet-adk/ into .claude/skills/
+parapetai-mcp init         # installs all packaged parapet-* skills into .claude/skills/
 claude mcp add parapet -e PARAPETAI_CONTROL_PLANE_URL=https://app.parapet.run -- parapetai-mcp serve
 ```
 
@@ -34,6 +34,7 @@ Then in Claude Code: "add Parapet to this project."
 | `parapet_get_quickstart` | The install command / env var names this deployment expects |
 | `parapet_list_agents` | Read-only agent listing |
 | `parapet_push_policy_file` | Write a Cedar policy file into an agent's bundle (owner/admin role required) |
+| `parapet_check_prerequisites` | Local check (no control-plane call) for Python 3.12+/pipx/uv, with OS-correct install commands for what's missing |
 
 A `parapet_getting_started` **prompt** is also registered — clients that
 list MCP prompts (e.g. Claude Code's `/mcp` menu) can pick it as a
@@ -42,13 +43,17 @@ with the tools above. It's discoverable, not auto-fired on connect — no
 MCP mechanism forces a prompt onto the first turn.
 
 This server never edits your project's files — it only talks to the
-control plane. Three packaged skills tell Claude Code how to use these
-tools and where to write the resulting config — `parapet-maf` for a
-Microsoft Agent Framework project, `parapet-adk` for a Google ADK one
-(the two frameworks put governance in different places, so the
-instrumentation steps genuinely differ; Claude Code picks whichever
-matches your project), and `parapet-quickdemo` for generating a runnable
-governed-vs-ungoverned example from scratch in a new or empty project.
+control plane (`parapet_check_prerequisites` is the one exception: it
+only ever reads local machine state, never sends anything anywhere).
+Four packaged skills tell Claude Code how to use these tools and where
+to write the resulting config — `parapet-maf` for a Microsoft Agent
+Framework project, `parapet-adk` for a Google ADK one (the two
+frameworks put governance in different places, so the instrumentation
+steps genuinely differ; Claude Code picks whichever matches your
+project), `parapet-quickdemo` for generating a runnable
+governed-vs-ungoverned example from scratch in a new or empty project,
+and `parapet-install-prereqs` for detecting and (with your per-step
+approval) installing Python/pipx/uv when one of the others needs them.
 
 Point at a different control plane (e.g. a local `make dev` instance) with
 `PARAPETAI_CONTROL_PLANE_URL` (default `https://app.parapet.run`, the hosted
