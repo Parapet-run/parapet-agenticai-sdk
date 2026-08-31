@@ -413,7 +413,8 @@ async def proxy(full_path: str, request: Request) -> Response:
         )
 
     upstream = (
-        settings.mcp_upstream_for(mcp_target) if snapshot.provider == "mcp"
+        settings.mcp_upstream_for(mcp_target)
+        if snapshot.provider == "mcp"
         else settings.upstream_for(snapshot.provider)
     )
     if upstream is None:
