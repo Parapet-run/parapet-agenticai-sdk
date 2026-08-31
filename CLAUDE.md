@@ -181,6 +181,7 @@ make lint              # ruff check (src, tests, gateway/src, gateway/tests, AND
 make typecheck          # mypy --strict on src and gateway/src
 make check                # lint + typecheck + test -- what CI runs
 make conformance           # the live cross-framework subset of tests/test_maf.py
+make docs                   # build the docs site (mkdocs build --strict); make docs-serve for live preview
 ```
 
 Single test:
@@ -319,9 +320,31 @@ Unbuilt or undocumented, not broken. Don't investigate these as bugs.
 - Every provider/framework claim needs a fixture or a conformance test, not
   an assertion in a doc — `conformance/matrix.yaml`'s status field is the
   enforced version of this rule for the gateway's client-library coverage.
+- **The `/docs` site (`mkdocs.yml`) is living documentation, not a
+  one-time snapshot — keep it in sync with every change that would make
+  it wrong.** A PR that changes a public constructor signature
+  (`Governor`, `GovernedAgent`, `GovernedRunner`, `governed_identity`,
+  `Decision`, an exception's attributes), adds/removes/renames an
+  environment variable, adds or changes a `parapetai-mcp` tool or skill,
+  moves a framework's conformance status in `conformance/matrix.yaml`, or
+  adds a new framework integration, updates the matching page(s) under
+  `docs/` in the **same** change — not as a follow-up. The reference pages
+  under `docs/reference/` are hand-authored against the real
+  signatures/docstrings (no mkdocstrings/autodoc), specifically so they
+  can carry "how to invoke this" guidance a docstring dump can't — that
+  means they drift if not updated by hand alongside the code. Verify with
+  `make docs` (`mkdocs build --strict` — fails the build on a broken
+  internal link) before considering docs-affecting work done; `make
+  docs-serve` for a live-reload preview while writing.
 
 ## Where to look
 
+- The [docs site](https://parapet-run.github.io/parapet-agenticai-sdk/)
+  (built from `docs/` + `mkdocs.yml`) — installation, quickstart, the
+  framework guides, the full `Governor`/`GovernedAgent`/`GovernedRunner`/
+  `governed_identity`/`Decision` API reference, every environment
+  variable, and the `parapetai-mcp` CLI/tools/skills reference. Start
+  here before re-deriving something from source that's already written up.
 - `docs/ARCHITECTURE.md` — the request path, fail-closed, the two-plane split
 - `docs/CONTROL_PLANE_API.md` — the exact HTTP protocol/signing scheme a PEP speaks
 - `docs/OBSERVABILITY.md` — decisions as content-free OTel spans

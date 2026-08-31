@@ -99,6 +99,13 @@ dev = [
     "mypy",
     "opentelemetry-sdk>=1.20,<2.0",
 ]
+# The docs site (mkdocs.yml, docs/) -- MkDocs Material, no Node.js toolchain.
+# Build/preview locally with `make docs-serve`; CI builds+deploys this via
+# .github/workflows/docs.yml on every push to main that touches docs/.
+docs = [
+    "mkdocs>=1.6,<2.0",
+    "mkdocs-material>=9.5,<10.0",
+]
 
 # This repo is BOTH the parapetai-agent package (above) and a uv workspace
 # root. The two enforcement points ship from here together: the in-process

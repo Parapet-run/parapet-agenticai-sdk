@@ -1,0 +1,116 @@
+site_name: Parapet
+site_description: >-
+  Cedar-governed AI agents. Open-source in-process SDK, standalone gateway
+  PEP, and MCP tooling for identity-scoped model/tool-call authorization.
+site_url: https://parapet-run.github.io/parapet-agenticai-sdk/
+repo_url: https://github.com/Parapet-run/parapet-agenticai-sdk
+repo_name: Parapet-run/parapet-agenticai-sdk
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+copyright: Copyright &copy; Parapet. MIT licensed.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - tables
+  - def_list
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Parapet-run/parapet-agenticai-sdk
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/parapetai-agent/
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Frameworks:
+      - Overview & support matrix: frameworks/overview.md
+      - Governor (framework-neutral): frameworks/governor.md
+      - Microsoft Agent Framework: frameworks/maf.md
+      - Google ADK: frameworks/adk.md
+  - CLI & MCP server:
+      - parapetai-mcp: cli/parapetai-mcp.md
+      - MCP tools: cli/mcp-tools.md
+      - Skills: cli/skills.md
+  - API Reference:
+      - Governor: reference/governor.md
+      - GovernedAgent: reference/governed-agent.md
+      - GovernedRunner: reference/governed-runner.md
+      - governed_identity: reference/governed-identity.md
+      - Decision: reference/decision.md
+      - Exceptions: reference/exceptions.md
+      - Environment variables: reference/env-vars.md
+  - Architecture:
+      - Request path & invariants: ARCHITECTURE.md
+      - Control plane API: CONTROL_PLANE_API.md
+      - Observability: OBSERVABILITY.md
+      - Groundedness (HHEM): GROUNDEDNESS_HHEM.md
+      - MAF integration pattern: maf-integration-pattern.md
+  - Decision records:
+      - "0006 — Cedar stage/action annotations": adr/0006-cedar-policy-stage-and-action-annotations.md
+      - "0008 — REVIEW decision outcome": adr/0008-review-decision-outcome.md
+      - "0009 — Approval loop": adr/0009-approval-loop.md
+  - Dependencies: dependencies.md

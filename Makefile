@@ -1,4 +1,4 @@
-.PHONY: install test test-sdk test-gateway lint typecheck check conformance
+.PHONY: install test test-sdk test-gateway lint typecheck check conformance docs docs-serve
 
 # This repo is a uv workspace: the root package (parapetai-agent, the
 # in-process PEP) plus two members -- gateway/ (the proxy PEP, same Cedar
@@ -35,3 +35,11 @@ check: lint typecheck test
 # conformance/README.md); they skip cleanly if uv is unavailable.
 conformance:
 	uv run --extra maf --extra adk --extra dev pytest -q tests/test_maf.py -k "ToolSourcesLiveEndToEnd or GovernedAgent"
+
+# docs/ + mkdocs.yml -- MkDocs Material, no Node.js toolchain. CI builds and
+# deploys the same way via .github/workflows/docs.yml on push to main.
+docs:
+	uv run --extra docs mkdocs build --strict
+
+docs-serve:
+	uv run --extra docs mkdocs serve
