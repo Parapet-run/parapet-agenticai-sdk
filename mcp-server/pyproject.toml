@@ -1,8 +1,8 @@
 [project]
 name = "parapetai-mcp"
-version = "0.5.0"
+version = "0.5.1"
 requires-python = ">=3.12"
-description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships six packaged skills: parapet-maf and parapet-adk (retrofit an existing project, one per framework integration), parapet-quickdemo (generate a runnable identity-based governance demo from nothing), parapet-install-prereqs (detect and, with per-step approval, install Python/pipx/uv), and parapet-audit / parapet-audit-fix (static AST scan for ungoverned model/tool calls, scored high/medium/low, plus a follow-up pass that wraps flagged sites in GovernedAgent/GovernedRunner)."
+description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships six packaged skills: parapet-maf/parapet-adk (retrofit an existing project per framework), parapet-quickdemo (generate a demo from nothing), parapet-install-prereqs (install Python/pipx/uv), and parapet-audit/parapet-audit-fix (scan for ungoverned model/tool calls, then wrap them in GovernedAgent/GovernedRunner)."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
