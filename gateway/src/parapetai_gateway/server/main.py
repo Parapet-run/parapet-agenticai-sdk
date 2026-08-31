@@ -20,6 +20,7 @@ from parapetai_agent.control_plane import (
     poll_once,
     run_bundle_poller,
 )
+from parapetai_agent.governance_runtime import configure_otel
 from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_gateway.config import settings
 from parapetai_gateway.server.app import create_app
@@ -70,6 +71,31 @@ def main() -> None:
     # URL are configured. With neither, the gateway behaves exactly as
     # before -- local policy_dir only, no outbound calls.
     control_plane_configured = bool(args.control_plane_url and args.agent_secret)
+
+    if control_plane_configured:
+        # Ships every _audit()-recorded decision (server/app.py) to the
+        # control plane as a real OTel LogRecord (docs/OBSERVABILITY.md) --
+        # console=False since structlog's own "decision" JSON line already
+        # covers local visibility (az containerapp logs / stdout); this adds
+        # the control-plane-visible copy, not a replacement for it.
+        # otlp_endpoint falls back to control_plane_url itself, same
+        # resolution order as parapetai_agent.maf.build_middleware's
+        # identical fallback -- a dedicated PARAPETAI_OTLP_ENDPOINT is only
+        # needed when the OTLP receiver lives somewhere else.
+        configure_otel(
+            service_name="parapetai-gateway",
+            otlp_endpoint=settings.otlp_endpoint or args.control_plane_url,
+            otlp_headers={"Authorization": f"Bearer {args.agent_secret}"},
+            console=False,
+            # "buffered" (configure_otel's own default) holds up to 2 minutes
+            # before flushing -- right for a high-throughput embedded agent,
+            # wrong here: a standalone gateway's call volume is typically low
+            # enough that per-decision export overhead doesn't matter, and a
+            # 2-minute delay makes "did this reach the control plane?" look
+            # broken during exactly the kind of interactive testing this
+            # deployment is for.
+            log_mode="streaming",
+        )
 
     private_key = None
     key_path = pep_identity.default_key_path()
@@ -147,6 +173,14 @@ def main() -> None:
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level,
+        # Behind a TLS-terminating ingress (Azure Container Apps, any L7 LB),
+        # the real client sees https but this process only ever accepts
+        # plain HTTP on its container port. Without this, request.base_url
+        # reports http://, which lands in the OAuth issuer/endpoint URLs
+        # returned by mcp_oauth's metadata routes -- a client that connects
+        # via https then gets told its own authorization_endpoint is http.
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
 
 

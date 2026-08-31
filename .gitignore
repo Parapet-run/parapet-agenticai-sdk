@@ -27,3 +27,10 @@ _to_delete/
 # git bundle transfer artifacts. They carry full history, so an accidental
 # `git add -A` in a PUBLIC repo is how private history would leak.
 *.bundle
+
+# gateway/deploy/azure -- generated state from running the deploy scripts
+# (the provisioned control-plane agent identity, the last-applied Container
+# App manifest for debugging). Real values, not templates -- .env.example
+# alongside them IS meant to be committed.
+gateway/deploy/azure/.last-manifest-*.yaml
+gateway/deploy/azure/.gateway-agent.env

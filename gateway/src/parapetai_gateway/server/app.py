@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from collections import deque
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -28,10 +29,12 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from parapetai_agent import governance_runtime
 from parapetai_agent.control_plane import ReviewClient, review_fingerprint
 from parapetai_agent.identity import Caller, resolve_from_path
 from parapetai_agent.policy.engine import Decision, PolicyEngine
 from parapetai_agent.providers.parsers import Snapshot, parse_request
+from parapetai_gateway import mcp_oauth
 from parapetai_gateway.config import settings
 from parapetai_gateway.fingerprint import fingerprint
 
@@ -51,6 +54,14 @@ _OBSERVATIONS_CAP = 500
 
 
 def create_app(engine: PolicyEngine, reviews: ReviewClient | None = None) -> FastAPI:
+    # Fail closed on a misconfigured oauth2 mode rather than silently running
+    # an authorization server anyone can complete DCR + /authorize against
+    # with no credential at all -- see mcp_oauth.py's module docstring.
+    if settings.oauth_enabled and not settings.mcp_oauth_shared_secret:
+        raise RuntimeError(
+            "PARAPETAI_MCP_AUTH_MODE=oauth2 requires PARAPETAI_MCP_OAUTH_SHARED_SECRET to be set"
+        )
+
     app = FastAPI(title="Parapet", docs_url="/__parapetai/docs", redoc_url=None)
     app.state.engine = engine
     # None when no control plane is configured -- the gateway then behaves
@@ -94,8 +105,165 @@ def create_app(engine: PolicyEngine, reviews: ReviewClient | None = None) -> Fas
         records.reverse()  # most recent first
         return {"records": records}
 
+    if settings.oauth_enabled:
+        _add_oauth_routes(app)
+
     app.include_router(router)
     return app
+
+
+_AUTHORIZE_FIELDS = (
+    "client_id",
+    "redirect_uri",
+    "response_type",
+    "code_challenge",
+    "code_challenge_method",
+    "state",
+)
+
+
+def _add_oauth_routes(app: FastAPI) -> None:
+    """OAuth 2.1 authorization-code+PKCE + Dynamic Client Registration for
+    the /mcp path -- see mcp_oauth.py's module docstring for what this is
+    and, more importantly, what it deliberately is not. Registered only
+    when PARAPETAI_MCP_AUTH_MODE=oauth2 so a "none"-mode gateway's route
+    table is byte-for-byte what it always was."""
+
+    def _base_url(request: Request) -> str:
+        return str(request.base_url).rstrip("/")
+
+    @app.get("/.well-known/oauth-protected-resource")
+    async def oauth_protected_resource(request: Request) -> dict[str, Any]:
+        base_url = _base_url(request)
+        return mcp_oauth.protected_resource_metadata(base_url, f"{base_url}/mcp")
+
+    @app.get("/.well-known/oauth-protected-resource/{resource_path:path}")
+    async def oauth_protected_resource_for(resource_path: str, request: Request) -> dict[str, Any]:
+        # RFC 8615 path-mapped well-known URI: with more than one downstream
+        # MCP server registered as SEPARATE Atlassian "external MCP server"
+        # entries (one per /a/{agent}/mcp/{target}), each does its own
+        # discovery against its own path -- a single shared document
+        # (the route above) would claim every target IS the bare /mcp
+        # resource, which is wrong once more than one target exists.
+        base_url = _base_url(request)
+        return mcp_oauth.protected_resource_metadata(base_url, f"{base_url}/{resource_path}")
+
+    @app.get("/.well-known/oauth-authorization-server")
+    async def oauth_authorization_server(request: Request) -> dict[str, Any]:
+        return mcp_oauth.authorization_server_metadata(_base_url(request))
+
+    @app.post("/register")
+    async def oauth_register(request: Request) -> Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return _oauth_error(
+                mcp_oauth.OAuthError("invalid_client_metadata", "body must be JSON")
+            )
+        try:
+            return JSONResponse(mcp_oauth.register_client(body), status_code=201)
+        except mcp_oauth.OAuthError as exc:
+            return _oauth_error(exc)
+
+    @app.get("/authorize")
+    async def oauth_authorize_get(request: Request) -> Response:
+        return _render_consent_form(request)
+
+    @app.post("/authorize")
+    async def oauth_authorize_post(request: Request) -> Response:
+        form = await request.form()
+
+        def _field(name: str) -> str | None:
+            # Every field here is a plain text input (see _render_consent_form)
+            # -- never a file upload -- but FormData.get()'s return type covers
+            # UploadFile too, so narrow it explicitly rather than trusting that.
+            value = form.get(name)
+            return value if isinstance(value, str) and value else None
+
+        params = {name: _field(name) for name in _AUTHORIZE_FIELDS}
+        secret = _field("secret") or ""
+        try:
+            mcp_oauth.start_authorization(
+                client_id=params["client_id"] or "",
+                redirect_uri=params["redirect_uri"] or "",
+                code_challenge=params["code_challenge"],
+                code_challenge_method=params["code_challenge_method"],
+                response_type=params["response_type"],
+            )
+        except mcp_oauth.OAuthError as exc:
+            return _oauth_error(exc)
+
+        if not secrets.compare_digest(secret, settings.mcp_oauth_shared_secret or ""):
+            return _render_consent_form(request, params=params, error="Incorrect secret.")
+
+        code = mcp_oauth.issue_code(
+            client_id=params["client_id"] or "",
+            redirect_uri=params["redirect_uri"] or "",
+            code_challenge=params["code_challenge"] or "",
+            ttl_s=settings.mcp_oauth_code_ttl_s,
+        )
+        redirect_uri = params["redirect_uri"] or ""
+        sep = "&" if "?" in redirect_uri else "?"
+        location = f"{redirect_uri}{sep}code={code}"
+        if params["state"]:
+            location += f"&state={params['state']}"
+        return Response(status_code=302, headers={"Location": location})
+
+    @app.post("/token")
+    async def oauth_token(request: Request) -> Response:
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            body = await request.json()
+        else:
+            form = await request.form()
+            body = dict(form)
+        try:
+            token = mcp_oauth.exchange_token(
+                grant_type=body.get("grant_type"),
+                code=body.get("code"),
+                redirect_uri=body.get("redirect_uri"),
+                client_id=body.get("client_id"),
+                code_verifier=body.get("code_verifier"),
+                ttl_s=settings.mcp_oauth_token_ttl_s,
+            )
+        except mcp_oauth.OAuthError as exc:
+            return _oauth_error(exc)
+        return JSONResponse(token, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
+def _oauth_error(exc: mcp_oauth.OAuthError) -> JSONResponse:
+    return JSONResponse(exc.to_body(), status_code=exc.status)
+
+
+def _render_consent_form(
+    request: Request, *, params: dict[str, Any] | None = None, error: str | None = None
+) -> Response:
+    """A single, deliberately minimal HTML page: this is not a login system,
+    it's a one-shot check of the deployment operator's shared secret (see
+    mcp_oauth.py's module docstring). GET populates the form from the
+    client's query params; a failed POST re-renders it with the same values
+    so the operator doesn't have to re-copy the client_id/redirect_uri by
+    hand."""
+    from html import escape
+
+    q = params or dict(request.query_params)
+    fields = "".join(
+        f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">'
+        for k, v in q.items()
+        if v is not None
+    )
+    error_html = f'<p style="color:#b00">{escape(error)}</p>' if error else ""
+    body = f"""<!doctype html><html>
+<body style="font-family:sans-serif;max-width:420px;margin:4rem auto">
+<h3>Authorize MCP access</h3>
+{error_html}
+<form method="post" action="/authorize">
+{fields}
+<label>Shared secret<br><input type="password" name="secret" autofocus></label><br><br>
+<button type="submit">Approve</button>
+</form>
+</body></html>"""
+    return Response(content=body, media_type="text/html")
 
 
 def create_app_factory() -> FastAPI:
@@ -108,6 +276,21 @@ def create_app_factory() -> FastAPI:
     """
     engine = PolicyEngine(settings.policy_dir, settings.entities_path)
     return create_app(engine)
+
+
+def _mcp_target(path: str) -> str | None:
+    """/mcp -> None (single-upstream, PARAPETAI_MCP_BASE_URL).
+    /mcp/{target}[/...] -> "{target}" (routes via PARAPETAI_MCP_UPSTREAMS).
+
+    Only the first segment after /mcp/ is the target name; anything past it
+    is not used by MCPParser (a Streamable HTTP server has one endpoint, see
+    Settings.mcp_upstream_for's docstring) but is tolerated rather than
+    rejected, in case a caller's URL includes a trailing slash or similar.
+    """
+    rest = path[len("/mcp") :]
+    if not rest or rest == "/":
+        return None
+    return rest.lstrip("/").split("/", 1)[0] or None
 
 
 @router.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -132,6 +315,35 @@ async def proxy(full_path: str, request: Request) -> Response:
             body = None  # unparsed -> coarse action, not a bypass
 
     snapshot = parse_request(path, body)
+
+    # The gateway fronts an ARBITRARY set of downstream MCP servers, not one
+    # fixed one -- /mcp routes via PARAPETAI_MCP_BASE_URL (unchanged,
+    # single-target); /mcp/{target} routes to whichever server
+    # PARAPETAI_MCP_UPSTREAMS names "target" as. See config.Settings.
+    # mcp_upstream_for()'s own docstring for the resolution rule.
+    mcp_target = _mcp_target(path) if snapshot.provider == "mcp" else None
+
+    # OAuth 2.1 is an authentication gate in front of Cedar, not a
+    # replacement for it -- Cedar still evaluates every request below
+    # exactly as it always has, keyed on the path-claimed agent_id, exactly
+    # as unauthenticated-by-OAuth requests already are today. This check
+    # exists only because some MCP clients (e.g. Atlassian Rovo's external
+    # MCP server requirement) refuse to talk to a server that doesn't offer
+    # it. See mcp_oauth.py's module docstring.
+    if snapshot.provider == "mcp" and settings.oauth_enabled:
+        if not mcp_oauth.validate_bearer(request.headers.get("authorization")):
+            base_url = str(request.base_url).rstrip("/")
+            # RFC 8615 path-mapped well-known URI: the resource metadata for
+            # THIS exact resource (e.g. /a/agent/mcp/jira), not one shared
+            # document for the whole origin -- required once more than one
+            # target is registered as a SEPARATE Atlassian "external MCP
+            # server", each doing its own discovery against its own path.
+            metadata_url = f"{base_url}/.well-known/oauth-protected-resource{path}"
+            return Response(
+                status_code=401,
+                headers={"WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}"'},
+            )
+
     context = {
         **snapshot.to_context(),
         "method": request.method,
@@ -139,6 +351,11 @@ async def proxy(full_path: str, request: Request) -> Response:
         "tenant": caller.tenant,
         "trust_tier": caller.trust_tier,
     }
+    if mcp_target is not None:
+        # Lets Cedar gate access per downstream server, not just per tool
+        # name within one server -- e.g. "this agent may reach jira but not
+        # servicenow" is otherwise inexpressible when both share one gateway.
+        context["mcp_target"] = mcp_target
 
     decision = engine.evaluate(
         principal=caller.principal,
@@ -195,11 +412,30 @@ async def proxy(full_path: str, request: Request) -> Response:
             reason=decision.reason,
         )
 
-    upstream = settings.upstream_for(snapshot.provider)
+    upstream = (
+        settings.mcp_upstream_for(mcp_target) if snapshot.provider == "mcp"
+        else settings.upstream_for(snapshot.provider)
+    )
     if upstream is None:
-        return _error(502, "no_upstream", f"no upstream configured for {snapshot.provider}")
+        detail = f"mcp target {mcp_target!r}" if mcp_target else snapshot.provider
+        return _error(502, "no_upstream", f"no upstream configured for {detail}")
 
-    return await _forward(client, upstream, path, request, raw, snapshot.stream)
+    # MCP's Streamable HTTP transport opens its server->client notification
+    # channel with a bare GET (no JSON body for MCPParser to read a `stream`
+    # flag out of) -- distinct from every other provider, where `stream` is
+    # always a body field on a POST. Buffering that GET would hold the
+    # connection open until the client eventually disconnects, violating the
+    # same "never buffer SSE" invariant this module already keeps for
+    # OpenAI/Anthropic streaming.
+    stream = snapshot.stream or (snapshot.provider == "mcp" and request.method == "GET")
+    # Every mcp Upstream's base_url is already the complete downstream
+    # endpoint, single-target or named (mcp_upstream_for()'s own docstring) --
+    # the /a/{agent_id}/mcp[/{target}] prefix is a Parapet-only routing hint
+    # the real server never sees, so nothing from `path` gets appended for
+    # mcp at all. openai/anthropic/gemini are unaffected -- their base_url is
+    # a host, and `path` selects a REST resource on it exactly as before.
+    forward_path = "" if snapshot.provider == "mcp" else path
+    return await _forward(client, upstream, forward_path, request, raw, stream)
 
 
 # ── forwarding ───────────────────────────────────────────────────────
@@ -240,18 +476,30 @@ async def _forward(
             headers=_passthrough_headers(resp.headers),
         )
 
+    try:
+        resp = await client.send(req, stream=True)
+    except httpx.HTTPError as exc:
+        log.error("upstream_error", url=url, error=str(exc))
+        return _error(502, "upstream_error", str(exc))
+
+    # Read from the real response, not assumed: an MCP tools/call POST can
+    # come back as a single application/json object OR as an SSE stream
+    # depending on what the server chooses per-request (Streamable HTTP
+    # transport), unlike OpenAI/Anthropic where stream=True always means SSE.
+    # Hardcoding text/event-stream here mislabelled the JSON case.
+    media_type = resp.headers.get("content-type", "text/event-stream").split(";")[0].strip()
+
     async def relay() -> AsyncIterator[bytes]:
         # Chunks are relayed untouched and in order. Do not accumulate: SSE
         # consumers time out, and reassembly here would add latency to every
         # token.
-        resp = await client.send(req, stream=True)
         try:
             async for chunk in resp.aiter_raw():
                 yield chunk
         finally:
             await resp.aclose()
 
-    return StreamingResponse(relay(), media_type="text/event-stream")
+    return StreamingResponse(relay(), media_type=media_type, status_code=resp.status_code)
 
 
 _CONNECTION_HEADERS = {
@@ -499,13 +747,20 @@ def _record_observation(
 
 
 def _audit(decision: Decision, caller: Caller, snapshot: Any, context: dict[str, Any]) -> None:
-    record = decision.to_audit_record(
+    # governance_runtime.audit() is the SAME "decision" event this function
+    # used to build by hand -- it strips content-bearing keys itself
+    # (content_free(), a strict superset of the messages_preview-only strip
+    # this used to do) and, when configure_otel() has run (server/main.py,
+    # only when a control plane is configured), ALSO ships it as a real OTel
+    # LogRecord to the control plane's /v1/logs -- a no-op otherwise, so this
+    # call is unconditionally safe with no control plane configured too.
+    governance_runtime.audit(
+        decision,
         principal=caller.principal,
-        action=snapshot.action,
+        snapshot=snapshot,
         resource=f'Resource::"{snapshot.provider}"',
-        context={k: v for k, v in context.items() if k != "messages_preview"},
+        context=context,
     )
-    log.info("decision", **record)
     if decision.evaluation_ms > settings.decision_budget_ms:
         log.warning(
             "slow_decision", ms=round(decision.evaluation_ms, 2), budget=settings.decision_budget_ms

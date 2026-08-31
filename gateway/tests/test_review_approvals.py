@@ -73,8 +73,14 @@ def _client(tmp_path: Path, *, review: bool = True, connected: bool = True) -> T
 def mcp_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
     """`mcp` ships with no default upstream (config.DEFAULT_UPSTREAMS), so a
     forwarded call 502s unless one is configured. Only the tests that assert a
-    request actually EXECUTED need this; the refusal tests do not."""
-    monkeypatch.setenv("PARAPETAI_MCP_BASE_URL", UPSTREAM)
+    request actually EXECUTED need this; the refusal tests do not.
+
+    PARAPETAI_MCP_BASE_URL is the server's COMPLETE endpoint (config.Settings.
+    mcp_upstream_for's own docstring) -- not a host a request path gets
+    appended to, unlike every other provider's base_url. The ".../mcp" suffix
+    here is therefore required, not incidental; the `f"{UPSTREAM}/mcp"` mocks
+    below expect the request to arrive at exactly this URL."""
+    monkeypatch.setenv("PARAPETAI_MCP_BASE_URL", f"{UPSTREAM}/mcp")
 
 
 def _post(client: TestClient, body: dict[str, Any] | None = None, **headers: str) -> Any:
