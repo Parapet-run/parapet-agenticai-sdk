@@ -1,6 +1,6 @@
 # MCP tools
 
-`parapetai-mcp serve` exposes 7 tools and 1 prompt over MCP. These are
+`parapetai-mcp serve` exposes 8 tools and 1 prompt over MCP. These are
 what the [skills](skills.md) call on your behalf — you can also invoke
 them directly from any MCP client. Every tool that hits the control plane
 takes an optional `control_plane_url` argument, defaulting to
@@ -123,6 +123,39 @@ Return shape:
 `checks` always includes `python`, `pipx`, `uv`, plus `homebrew` (macOS),
 `package_manager` (Linux), or `winget` (Windows).
 
+## `parapet_audit_codebase`
+
+```python
+parapet_audit_codebase(path: str, output_dir: str | None = None) -> dict
+```
+
+Local, static AST scan — **no control plane call, nothing sent anywhere**,
+same locality guarantee as `parapet_check_prerequisites` — of an existing
+Python codebase for ungoverned model/tool-call sites: a raw
+`agent_framework.Agent` or `google.adk.runners.Runner`/`InMemoryRunner`
+construction (especially one with `tools=`), a `build_middleware()`/
+`build_plugin()` result never registered into `middleware=`/`plugins=`, a
+raw `openai`/`anthropic`/`google.genai` client with no governance visible
+in the same file, or a `GovernedAgent`/`GovernedRunner` relying only on
+the SDK's generic bundled default policy.
+
+Deliberately favors **precision over recall** — a narrow, hand-verified
+set of known import/call shapes rather than a fuzzy heuristic that would
+flag arbitrary `.create(`-shaped calls across the whole codebase. It can
+miss a real ungoverned call site it has no pattern for, but shouldn't
+report a false high. **A clean result is not a certification** — see
+`files_skipped` in the return value and the report's own header before
+treating an empty findings list as proof of governance.
+
+Each finding is scored `high`/`medium`/`low` and carries a `framework`
+field (`"maf"`, `"adk"`, or `null`) so a follow-up fix pass knows which of
+`GovernedAgent`/`GovernedRunner` applies, if either does. Written to a
+Markdown report at `{output_dir or path/.parapet/audit}/report.md` and
+also returned inline as `findings`. See [Skills](skills.md#parapet-audit)
+for the read-only audit workflow and
+[parapet-audit-fix](skills.md#parapet-audit-fix) for the follow-up pass
+that acts on it.
+
 ## `parapet_getting_started` (prompt, not a tool)
 
 ```python
@@ -134,6 +167,7 @@ pickable starter prompt by clients that list MCP prompts (e.g. Claude
 Code's `/mcp` menu). No MCP mechanism fires a prompt automatically on
 connect, so a client/skill that wants "ask before doing anything"
 behavior needs to invoke this explicitly as its first move, rather than
-assuming it already ran. Returns a static 3-option menu: build a demo via
+assuming it already ran. Returns a static 4-option menu: build a demo via
 `parapet-quickdemo`, set up prerequisites via `parapet-install-prereqs`,
-or list the raw tools.
+audit an existing codebase via `parapet-audit`/`parapet-audit-fix`, or
+list the raw tools.

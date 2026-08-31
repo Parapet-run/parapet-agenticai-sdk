@@ -22,6 +22,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from parapetai_mcp.audit import audit_codebase
 from parapetai_mcp.client import ControlPlaneClient, NotLoggedInError
 from parapetai_mcp.config import DEFAULT_CONTROL_PLANE_URL, set_cli_token
 
@@ -155,6 +156,26 @@ async def parapet_push_policy_file(
         return {"error": str(exc)}
 
 
+@mcp.tool()
+def parapet_audit_codebase(path: str, output_dir: str | None = None) -> dict[str, Any]:
+    """Local, static AST scan of a Python codebase -- no control plane
+    call, nothing sent anywhere, same locality guarantee as
+    parapet_check_prerequisites -- for ungoverned model/tool-call sites:
+    a raw agent_framework.Agent or google.adk.runners.Runner/
+    InMemoryRunner construction (especially one with tools=), a
+    build_middleware()/build_plugin() result never registered, a raw
+    openai/anthropic/google.genai client with no governance visible in
+    the same file, or a GovernedAgent/GovernedRunner relying only on the
+    SDK's generic bundled default policy. Each finding is scored high/
+    medium/low and written to a Markdown report at
+    {output_dir or path/.parapet/audit}/report.md (also returned inline
+    in `findings`). Deliberately favors precision over recall -- see the
+    report's own header before treating a clean result as a certification.
+    Run the parapet-audit-fix skill afterward to apply fixes and confirm
+    the finding count actually goes down."""
+    return audit_codebase(path, output_dir)
+
+
 def _python_check() -> dict[str, Any]:
     # Checks real binaries on PATH, not this process's own interpreter --
     # parapetai-mcp normally runs inside a pipx-managed venv, which says
@@ -272,14 +293,20 @@ def parapet_getting_started() -> str:
         "2. Set up prerequisites -- check for Python 3.12+/pipx/uv and "
         "install whatever's missing, one approved step at a time. (Use the "
         "parapet-install-prereqs skill for this.)\n"
-        "3. Something else -- available tools: parapet_login (device-code "
+        "3. Audit an existing codebase for ungoverned model/tool calls -- a "
+        "local, static scan (no control plane call) scored high/medium/low, "
+        "saved as a Markdown report, with a follow-up fix pass that wraps "
+        "flagged sites in GovernedAgent/GovernedRunner. (Use the "
+        "parapet-audit skill, then parapet-audit-fix, for this.)\n"
+        "4. Something else -- available tools: parapet_login (device-code "
         "auth), parapet_whoami (who you are + your existing agents), "
         "parapet_provision_agent (create a new governed agent), "
         "parapet_get_quickstart (this deployment's install command / env "
         "vars / default model), parapet_list_agents, "
         "parapet_push_policy_file (write a Cedar policy into an agent's "
-        "bundle), and parapet_check_prerequisites (local Python/pipx/uv "
-        "check).\n\n"
+        "bundle), parapet_check_prerequisites (local Python/pipx/uv "
+        "check), and parapet_audit_codebase (local static governance scan)."
+        "\n\n"
         "Which would you like?"
     )
 

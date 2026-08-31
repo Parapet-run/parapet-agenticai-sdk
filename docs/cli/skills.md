@@ -1,6 +1,6 @@
 # Skills
 
-`parapetai-mcp init` installs four Claude Code skills into
+`parapetai-mcp init` installs six Claude Code skills into
 `.claude/skills/`. Each is a `SKILL.md` that tells an agent (Claude Code,
 or any other MCP client that reads skills) exactly which `parapet_*`
 [tools](mcp-tools.md) to call, in what order, and what never to do — they
@@ -62,6 +62,38 @@ per-step approval. On macOS, Homebrew has to succeed before `pipx`/`uv`'s
 own install commands will, so ordering matters and this skill enforces
 it.
 
+## `parapet-audit`
+
+Use when: you want to know how exposed an **existing** codebase is before
+touching it — "audit my codebase for governance risks", "scan for
+ungoverned model/tool calls", "how exposed are we without Parapet".
+
+**Read-only.** Runs [`parapet_audit_codebase`](mcp-tools.md#parapet_audit_codebase)
+(a local, static AST scan — no control plane call, nothing sent anywhere)
+and reports the high/medium/low findings, pointing at the saved Markdown
+report (`.parapet/audit/report.md` by default). Never edits, deletes, or
+moves any file in the audited codebase itself. Explicitly honest about
+what the scanner is: precision-favoring and best-effort against a curated
+set of known import/call shapes — a clean result is not a certification,
+and `files_skipped` is reported so blind spots stay visible.
+
+## `parapet-audit-fix`
+
+Use when: you have a report from `parapet-audit` and want to act on it —
+"fix the audit findings", "wrap the flagged calls in
+GovernedAgent/GovernedRunner".
+
+**Edits files** — the one skill here that isn't read-only by default,
+unlike `parapet-audit`. Triages each finding by category first (a raw
+`Agent`/`Runner` construction gets the actual GovernedAgent/GovernedRunner
+wrap, following `parapet-maf`/`parapet-adk`'s own instrumentation
+procedure per the finding's `framework` field; a `build_middleware()`/
+`build_plugin()` result that was never registered gets a smaller,
+mechanical wiring fix; a raw model client with no framework in use gets
+pointed at `Governor` instead, never force-fit into a framework wrapper
+that doesn't apply), then re-runs the audit afterward to confirm the
+finding count actually dropped rather than just reporting "fixed."
+
 ## How they fit together
 
 ```mermaid
@@ -70,6 +102,7 @@ graph TD
     C["user: build me a demo"] --> D[parapet-quickdemo]
     E["user: govern my MAF agent"] --> F[parapet-maf]
     G["user: govern my ADK agent"] --> H[parapet-adk]
+    N["user: audit my codebase"] --> O[parapet-audit]
     D --> I[parapet_check_prerequisites]
     F --> I
     H --> I
@@ -79,6 +112,12 @@ graph TD
     H --> K
     K --> L[parapet_provision_agent]
     L --> M["parapet_push_policy_file (quickdemo only)"]
+    O --> P[parapet_audit_codebase]
+    P --> Q[".parapet/audit/report.md"]
+    Q -->|"user: fix these"| R[parapet-audit-fix]
+    R -->|"maf findings"| F
+    R -->|"adk findings"| H
+    R --> P
 ```
 
 Every skill is careful about two things that show up repeatedly in their
