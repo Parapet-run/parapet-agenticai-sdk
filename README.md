@@ -46,8 +46,8 @@ and the model's responses never leave the process.
 If you're using [Claude Code](https://claude.com/claude-code), skip writing
 any of this by hand. `parapetai-mcp` is an MCP server that logs in to a
 control plane, provisions an agent, and either generates a runnable demo
-project from nothing or retrofits Parapet into a project you already have —
-Claude does the file edits.
+project from nothing, retrofits Parapet into a project you already have, or
+audits one for ungoverned model/tool calls — Claude does the file edits.
 
 ```bash
 pipx install parapetai-mcp
@@ -64,6 +64,11 @@ Then, in Claude Code:
 - **"Add Parapet to my agent"** (in an existing `agent_framework` or
   `google.adk` project) → the `parapet-maf` / `parapet-adk` skill
   provisions an agent and instruments your existing code.
+- **"Audit my codebase for governance risks"** → the `parapet-audit` skill
+  runs a local, read-only static scan (no control-plane call) for
+  ungoverned model/tool calls, scored high/medium/low; `parapet-audit-fix`
+  then wraps the flagged sites in `GovernedAgent`/`GovernedRunner` as a
+  separate, explicit step.
 
 No `pipx`? `brew install pipx` (macOS) or
 `python3 -m pip install --user pipx && pipx ensurepath`. Full reference:

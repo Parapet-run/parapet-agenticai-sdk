@@ -3,8 +3,8 @@
 `parapetai-mcp` is an [MCP](https://modelcontextprotocol.io/) server for
 Claude Code (and any other MCP client): device-code login to a Parapet
 control plane, provisioning agents, pulling the exact quickstart config a
-codebase needs, and four packaged **skills** that scaffold or retrofit a
-governed agent project for you.
+codebase needs, and six packaged **skills** that scaffold, retrofit, or
+audit a governed agent project for you.
 
 It ships as its own PyPI package, separate from `parapetai-agent` — you
 don't need it to use the SDK, and using it never requires writing
@@ -37,7 +37,8 @@ claude mcp add parapet -e PARAPETAI_CONTROL_PLANE_URL=https://app.parapet.run --
 ```
 
 - `init [project_dir]` (default `.`) copies every packaged skill —
-  `parapet-maf`, `parapet-adk`, `parapet-quickdemo`, `parapet-install-prereqs`
+  `parapet-maf`, `parapet-adk`, `parapet-quickdemo`, `parapet-install-prereqs`,
+  `parapet-audit`, `parapet-audit-fix`
   — into `<project_dir>/.claude/skills/parapet-<name>/`. It never touches
   anything outside `.claude/skills/`; it does not instrument your project's
   code itself. That's what the skills themselves do once invoked.
@@ -47,8 +48,9 @@ claude mcp add parapet -e PARAPETAI_CONTROL_PLANE_URL=https://app.parapet.run --
 - `serve` (no other flags) runs the MCP server over stdio — this is what
   an MCP client actually launches; you don't run it by hand.
 
-Once connected, ask Claude Code to build a demo, or to add Parapet to an
-existing MAF/ADK project, and the relevant skill takes it from there — see
+Once connected, ask Claude Code to build a demo, add Parapet to an
+existing MAF/ADK project, or audit an existing codebase for ungoverned
+model/tool calls, and the relevant skill takes it from there — see
 [Skills](skills.md) for what each one does, and [MCP tools](mcp-tools.md)
 for the individual tools they call along the way.
 
