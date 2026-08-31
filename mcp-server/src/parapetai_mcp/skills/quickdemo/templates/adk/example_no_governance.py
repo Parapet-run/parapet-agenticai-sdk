@@ -9,8 +9,10 @@ and it just runs. This is the risk example_governed.py's identical setup
 
 Model: mocked locally by default (mock_llm.py, a google.adk.models.BaseLlm
 subclass -- no network call). Set GOOGLE_API_KEY in .env to a real key to
-use a real Gemini model instead -- see .env.example. Either way the agent
-code below is unchanged; only what's passed as model= differs.
+use a real Gemini model instead -- see .env.cloud.example /
+.env.local.example. Either way the agent code below is unchanged; only
+what's passed as model= differs. This script never reads PARAPETAI_MODE --
+it never governs anything, so cloud vs. local mode is irrelevant to it.
 
 Run directly for readable output, or via driver.py for the side-by-side
 comparison with example_governed.py.
@@ -22,6 +24,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -61,7 +64,21 @@ def _text_of(content) -> str:
     return "".join(p.text or "" for p in content.parts)
 
 
-async def _run_one(model, name: str, org: str, prompt: str) -> str:
+def _usage_of(usage) -> dict[str, int | None]:
+    # google.genai's GenerateContentResponseUsageMetadata -- the exact
+    # attribute shape parapetai_agent.adk._token_count_attributes() reads
+    # off LlmResponse.usage_metadata. Attribute access (not dict-like),
+    # unlike agent_framework's UsageDetails TypedDict.
+    if usage is None:
+        return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    return {
+        "prompt_tokens": usage.prompt_token_count,
+        "completion_tokens": usage.candidates_token_count,
+        "total_tokens": usage.total_token_count,
+    }
+
+
+async def _run_one(model, name: str, org: str, prompt: str) -> dict:
     from google.adk.agents import Agent
     from google.adk.runners import InMemoryRunner
     from google.genai import types
@@ -81,6 +98,8 @@ async def _run_one(model, name: str, org: str, prompt: str) -> str:
         app_name=APP_NAME, user_id=name, session_id=session_id
     )
     text = ""
+    usage = None
+    started = time.perf_counter()
     async for event in runner.run_async(
         user_id=name,
         session_id=session_id,
@@ -89,7 +108,10 @@ async def _run_one(model, name: str, org: str, prompt: str) -> str:
         t = _text_of(event.content)
         if t:
             text = t
-    return text
+        if event.usage_metadata is not None:
+            usage = event.usage_metadata  # last non-None chunk carries the full total
+    latency_ms = (time.perf_counter() - started) * 1000
+    return {"text": text, "latency_ms": latency_ms, **_usage_of(usage)}
 
 
 async def main() -> None:
@@ -102,10 +124,24 @@ async def main() -> None:
 
     results = []
     for name, org, prompt, expected_tool in SCENARIOS:
-        text = await _run_one(model, name, org, prompt)
-        print(f"[ungoverned] {name} ({org}) -> {expected_tool}: {text}")
+        run = await _run_one(model, name, org, prompt)
+        tokens_note = run["total_tokens"] if run["total_tokens"] is not None else "-"
+        print(
+            f"[ungoverned] {name} ({org}) -> {expected_tool}: {run['text']} "
+            f"({run['latency_ms']:.1f}ms, {tokens_note} tokens)"
+        )
         results.append(
-            {"name": name, "org": org, "tool": expected_tool, "outcome": "ALLOWED", "text": text}
+            {
+                "name": name,
+                "org": org,
+                "tool": expected_tool,
+                "outcome": "ALLOWED",
+                "text": run["text"],
+                "latency_ms": run["latency_ms"],
+                "prompt_tokens": run["prompt_tokens"],
+                "completion_tokens": run["completion_tokens"],
+                "total_tokens": run["total_tokens"],
+            }
         )
 
     # No agent_id/control_plane_url here -- this script never calls the

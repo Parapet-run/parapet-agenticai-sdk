@@ -9,8 +9,10 @@ and it just runs. This is the risk example_governed.py's identical setup
 
 Model: mocked locally by default (mock_model_server.py, stdlib only, no
 network). Set OPENAI_API_KEY in .env to a real key to use a real model
-instead -- see .env.example. Either way the agent code below is
-unchanged; only where OpenAIChatCompletionClient points differs.
+instead -- see .env.cloud.example / .env.local.example. Either way the
+agent code below is unchanged; only where OpenAIChatCompletionClient
+points differs. This script never reads PARAPETAI_MODE -- it never
+governs anything, so cloud vs. local mode is irrelevant to it.
 
 Run directly for readable output, or via driver.py for the side-by-side
 comparison with example_governed.py.
@@ -22,6 +24,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,9 +56,24 @@ def _real_model_configured() -> bool:
     return bool(key) and key not in ("mock", "sk-mock", "changeme")
 
 
-async def _run_one(client, name: str, org: str, prompt: str) -> str:
+def _usage_of(result) -> dict[str, int | None]:
+    # agent_framework's AgentResponse.usage_details is a UsageDetails
+    # TypedDict (input_token_count/output_token_count/total_token_count) --
+    # the exact same shape parapetai_agent.maf._token_count_attributes()
+    # reads off ChatResponse.usage_details. getattr()'d defensively since
+    # a mock/older client may not populate it.
+    usage = getattr(result, "usage_details", None) or {}
+    return {
+        "prompt_tokens": usage.get("input_token_count"),
+        "completion_tokens": usage.get("output_token_count"),
+        "total_tokens": usage.get("total_token_count"),
+    }
+
+
+async def _run_one(client, name: str, org: str, prompt: str) -> dict:
     from agent_framework import Agent
 
+    started = time.perf_counter()
     async with Agent(
         client=client,
         name="workplace-agent",
@@ -66,7 +84,8 @@ async def _run_one(client, name: str, org: str, prompt: str) -> str:
         tools=[salesforce_lookup, hr_lookup],
     ) as agent:
         result = await agent.run(prompt)
-        return result.text
+    latency_ms = (time.perf_counter() - started) * 1000
+    return {"text": result.text, "latency_ms": latency_ms, **_usage_of(result)}
 
 
 async def main() -> None:
@@ -90,15 +109,23 @@ async def main() -> None:
     results = []
     for name, org, prompt, expected_tool in SCENARIOS:
         client = OpenAIChatCompletionClient(**client_kwargs)
-        text = await _run_one(client, name, org, prompt)
-        print(f"[ungoverned] {name} ({org}) -> {expected_tool}: {text}")
+        run = await _run_one(client, name, org, prompt)
+        tokens_note = run["total_tokens"] if run["total_tokens"] is not None else "-"
+        print(
+            f"[ungoverned] {name} ({org}) -> {expected_tool}: {run['text']} "
+            f"({run['latency_ms']:.1f}ms, {tokens_note} tokens)"
+        )
         results.append(
             {
                 "name": name,
                 "org": org,
                 "tool": expected_tool,
                 "outcome": "ALLOWED",
-                "text": text,
+                "text": run["text"],
+                "latency_ms": run["latency_ms"],
+                "prompt_tokens": run["prompt_tokens"],
+                "completion_tokens": run["completion_tokens"],
+                "total_tokens": run["total_tokens"],
             }
         )
 

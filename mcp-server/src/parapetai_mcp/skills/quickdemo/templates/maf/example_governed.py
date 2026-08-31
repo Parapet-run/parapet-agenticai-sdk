@@ -16,14 +16,23 @@ decision events via structlog, the same technique
 examples/ungoverned_vs_governed/run.py uses, and reports the actual
 decision.
 
-REQUIRES an agent_id + agent_secret from a real Parapet control plane --
-see .env.example. This is the one file in this demo that talks to the
-control plane: every governed decision it makes is visible at
-{control_plane_url}/agents/{agent_id} the moment it runs.
+Two modes, toggled by PARAPETAI_MODE in .env (see .env.cloud.example /
+.env.local.example, and README.md's "Switching between cloud and local
+mode"):
+
+- PARAPETAI_MODE=cloud (default) -- REQUIRES an agent_id + agent_secret
+  from a real Parapet control plane. This is the one file in this demo
+  that talks to the control plane in this mode: every governed decision
+  it makes is visible at {control_plane_url}/agents/{agent_id} the moment
+  it runs. The fetched bundle is also written to PARAPETAI_PERSIST_POLICY_DIR
+  (on by default) so you can inspect what the control plane actually sent.
+- PARAPETAI_MODE=local -- no control-plane call at all. Cedar policies are
+  read straight from ./policies/ on disk instead (GovernedAgent(policy_dir=
+  "./policies")). Needs no agent_id/secret/account_id.
 
 Model: mocked locally by default (mock_model_server.py). Set
 OPENAI_API_KEY in .env to a real key to use a real model instead -- see
-.env.example.
+.env.cloud.example / .env.local.example.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -80,9 +90,38 @@ def _required_env(name: str) -> str:
     if not value:
         raise SystemExit(
             f"{name} is not set -- example_governed.py needs a real provisioned agent "
-            "(see .env.example). Run the parapet-quickdemo skill's provisioning step first."
+            "in cloud mode (see .env.cloud.example). Run the parapet-quickdemo skill's "
+            "provisioning step first, or set PARAPETAI_MODE=local to skip the control "
+            "plane entirely (see .env.local.example)."
         )
     return value
+
+
+def _resolve_persist_policy_dir() -> str | None:
+    # On by default -- a disposable local cache of the fetched control-plane
+    # bundle, useful for diffing against ./policies/40-org.cedar when a
+    # decision looks wrong. Never bundle/deploy it; see README.md.
+    raw = os.environ.get("PARAPETAI_PERSIST_POLICY_DIR")
+    if raw is None:
+        return str(Path(__file__).parent / ".parapet-cache" / "policies")
+    raw = raw.strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return str(path if path.is_absolute() else Path(__file__).parent / path)
+
+
+def _usage_of(result) -> dict[str, int | None]:
+    # Same UsageDetails shape/extraction as example_no_governance.py's
+    # _usage_of() -- see that file's comment. GovernedAgent doesn't
+    # transform usage_details at all, so this reads identically governed
+    # or not.
+    usage = getattr(result, "usage_details", None) or {}
+    return {
+        "prompt_tokens": usage.get("input_token_count"),
+        "completion_tokens": usage.get("output_token_count"),
+        "total_tokens": usage.get("total_token_count"),
+    }
 
 
 async def _run_one(
@@ -90,14 +129,29 @@ async def _run_one(
     name: str,
     org: str,
     prompt: str,
-    agent_id: str,
-    agent_secret: str,
-    control_plane_url: str,
-) -> tuple[str, str | None]:
+    *,
+    agent_id: str | None,
+    agent_secret: str | None,
+    control_plane_url: str | None,
+    policy_dir: str | None,
+    persist_policy_dir: str | None,
+) -> dict:
     from parapetai_agent import GovernedAgent
     from parapetai_agent.scoped_data import governed_identity
 
+    governed_kwargs: dict = {"console": False}
+    if policy_dir is not None:
+        governed_kwargs["policy_dir"] = policy_dir  # PARAPETAI_MODE=local
+    else:
+        governed_kwargs.update(  # PARAPETAI_MODE=cloud
+            agent_id=agent_id,
+            agent_secret=agent_secret,
+            control_plane_url=control_plane_url,
+            persist_policy_dir=persist_policy_dir,
+        )
+
     _DECISIONS.clear()
+    started = time.perf_counter()
     async with GovernedAgent(
         client=client,
         name="workplace-agent",
@@ -106,26 +160,58 @@ async def _run_one(
             "Use the tool that matches what the user is asking for."
         ),
         tools=[salesforce_lookup, hr_lookup],
-        agent_id=agent_id,
-        agent_secret=agent_secret,
-        control_plane_url=control_plane_url,
-        console=False,
+        **governed_kwargs,
     ) as agent:
         with governed_identity(claims={"org": org, "name": name}):
             result = await agent.run(prompt)
+    latency_ms = (time.perf_counter() - started) * 1000  # model + tool + governance, wall-clock
 
+    # The Cedar Decision is the SAME dataclass (policy/engine.py's Decision,
+    # via to_audit_record()) regardless of framework -- effect, reason,
+    # determining_policies, evaluation_ms are all present here exactly as
+    # they'd be from bare Governor or GovernedRunner. Only the SURFACE that
+    # folds a deny into the agent's own response differs by framework (see
+    # maf.py's own "enforcement asymmetry" docstring); the decision data
+    # itself is not framework-specific.
     tool_decision = next((d for d in _DECISIONS if d.get("action") == "tool_call"), None)
     outcome = tool_decision.get("decision") if tool_decision else None
-    return result.text, outcome
+    determining_policies = (
+        list(tool_decision.get("determining_policies") or []) if tool_decision else []
+    )
+    evaluation_ms = tool_decision.get("evaluation_ms") if tool_decision else None
+    return {
+        "text": result.text,
+        "outcome": outcome,
+        "determining_policies": determining_policies,
+        "evaluation_ms": evaluation_ms,
+        "latency_ms": latency_ms,
+        **_usage_of(result),
+    }
 
 
 async def main() -> None:
     from agent_framework.openai import OpenAIChatCompletionClient
 
-    agent_id = _required_env("PARAPETAI_AGENT_ID")
-    agent_secret = _required_env("PARAPETAI_AGENT_SECRET")
-    account_id = _required_env("PARAPETAI_ACCOUNT_ID")
-    control_plane_url = os.environ.get("PARAPETAI_CONTROL_PLANE_URL", "https://app.parapet.run")
+    governance_mode = os.environ.get("PARAPETAI_MODE", "cloud").strip().lower()
+    if governance_mode not in ("cloud", "local"):
+        raise SystemExit(f"PARAPETAI_MODE must be 'cloud' or 'local', got {governance_mode!r}")
+
+    if governance_mode == "local":
+        agent_id = os.environ.get("PARAPETAI_AGENT_ID", "").strip() or "local-quickdemo"
+        agent_secret = None
+        account_id = os.environ.get("PARAPETAI_ACCOUNT_ID", "").strip()
+        control_plane_url = ""
+        policy_dir: str | None = str(Path(__file__).parent / "policies")
+        persist_policy_dir = None
+    else:
+        agent_id = _required_env("PARAPETAI_AGENT_ID")
+        agent_secret = _required_env("PARAPETAI_AGENT_SECRET")
+        account_id = _required_env("PARAPETAI_ACCOUNT_ID")
+        control_plane_url = os.environ.get(
+            "PARAPETAI_CONTROL_PLANE_URL", "https://app.parapet.run"
+        )
+        policy_dir = None
+        persist_policy_dir = _resolve_persist_policy_dir()
 
     if _real_model_configured():
         mode = "real"
@@ -145,18 +231,40 @@ async def main() -> None:
     results = []
     for name, org, prompt, expected_tool in SCENARIOS:
         client = OpenAIChatCompletionClient(**client_kwargs)
-        text, outcome = await _run_one(
-            client, name, org, prompt, agent_id, agent_secret, control_plane_url
+        run = await _run_one(
+            client,
+            name,
+            org,
+            prompt,
+            agent_id=agent_id,
+            agent_secret=agent_secret,
+            control_plane_url=control_plane_url,
+            policy_dir=policy_dir,
+            persist_policy_dir=persist_policy_dir,
         )
+        outcome = run["outcome"]
         label = "ALLOWED" if outcome == "allow" else "DENIED" if outcome == "deny" else "UNKNOWN"
-        print(f"[governed] {name} ({org}) -> {expected_tool}: {label}")
+        policy_note = ",".join(run["determining_policies"]) or "-"
+        eval_note = f"{run['evaluation_ms']:.3f}ms" if run["evaluation_ms"] is not None else "-"
+        tokens_note = run["total_tokens"] if run["total_tokens"] is not None else "-"
+        print(
+            f"[governed/{governance_mode}] {name} ({org}) -> {expected_tool}: {label} "
+            f"(policy: {policy_note}, cedar eval: {eval_note}, "
+            f"total: {run['latency_ms']:.1f}ms, {tokens_note} tokens)"
+        )
         results.append(
             {
                 "name": name,
                 "org": org,
                 "tool": expected_tool,
                 "outcome": label,
-                "text": text,
+                "text": run["text"],
+                "determining_policies": run["determining_policies"],
+                "evaluation_ms": run["evaluation_ms"],
+                "latency_ms": run["latency_ms"],
+                "prompt_tokens": run["prompt_tokens"],
+                "completion_tokens": run["completion_tokens"],
+                "total_tokens": run["total_tokens"],
             }
         )
 
@@ -165,9 +273,11 @@ async def main() -> None:
         + json.dumps(
             {
                 "mode": mode,
+                "governance_mode": governance_mode,
                 "agent_id": agent_id,
                 "account_id": account_id,
                 "control_plane_url": control_plane_url,
+                "policy_dir": policy_dir,
                 "results": results,
             }
         )

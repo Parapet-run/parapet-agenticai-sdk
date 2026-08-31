@@ -69,12 +69,12 @@ Otherwise, by hand:
    - `parapet_provision_agent` (display_name: "quickdemo-maf-governed")
    - `parapet_push_policy_file` with `filename="40-org.cedar"` and the
      contents of `policy/40-org.cedar` in this directory
-4. Copy `.env.example` to `.env` and fill in `PARAPETAI_AGENT_ID` /
-   `PARAPETAI_AGENT_SECRET` from step 3 (the secret is shown once —
-   `parapet_provision_agent`'s response), and `PARAPETAI_ACCOUNT_ID` from
-   `parapet_whoami`'s `account_id` field (every agent page on the console
-   is scoped under `/a/{account_id}/...`, so this is needed to print a
-   working link, not just to run the demo).
+4. Copy `.env.cloud.example` to both `.env` and `.env.cloud`, and fill in
+   `PARAPETAI_AGENT_ID` / `PARAPETAI_AGENT_SECRET` from step 3 (the secret
+   is shown once — `parapet_provision_agent`'s response), and
+   `PARAPETAI_ACCOUNT_ID` from `parapet_whoami`'s `account_id` field
+   (every agent page on the console is scoped under `/a/{account_id}/...`,
+   so this is needed to print a working link, not just to run the demo).
 
 ### 4. (Optional) a real model instead of the mock
 
@@ -101,3 +101,112 @@ other's tool. The final lines print the governed agent's control-plane
 URL — open it to see the policy, the allow/deny decisions, and the
 traces for yourself. (There's only one agent — `example_no_governance.py`
 never calls the control plane, so there's nothing to point at there.)
+
+## Reading the decision data
+
+Each governed row in `driver.py`'s table carries four extra columns beyond
+ALLOWED/DENIED:
+
+- **policy** — cedarpy's own determining-policy id(s) (its
+  `diagnostics.reasons`, e.g. `policy3`) for whichever rule in
+  `policies/00-base.cedar`/`40-org.cedar` decided the outcome. Which rule
+  denied Sally's `salesforce_lookup` call, not just that something did.
+  Note this is cedarpy's raw positional id (assigned in file-concatenation
+  order across every loaded `.cedar` file), not the friendlier `@id(...)`
+  annotation you see in the `.cedar` source (e.g.
+  `salesforce_requires_sales_org`) — `parapetai_agent`'s own resolution of
+  `@id` to a readable label (`policy/engine.py`'s `_policy_labels()`) is
+  private and only used to build `Decision.reason` for a `review`-eligible
+  denial, not for a plain hard deny like this demo's org policy. For a
+  hard deny, `Decision.reason` itself is a generic `"denied: no permit
+  matched or forbid applied"` — cross-reference the printed `policy3`-style
+  id against the `.cedar` files' statement order by hand if you need the
+  name.
+- **cedar eval** — how long that one Cedar evaluation took, in
+  milliseconds (wall-clock around `cedarpy.is_authorized()`, not the
+  whole tool/model call).
+- **total** — wall-clock latency for the whole scenario (model call + tool
+  call + governance checks), timed by this demo around `agent.run()`, not
+  something `Decision` itself carries.
+- **tokens** — `total_token_count` from the model response's own usage
+  data (`AgentResponse.usage_details`, an `agent_framework` field, nothing
+  to do with Cedar). `$0.00` in mock mode (canned figures from
+  `mock_model_server.py`); real-model runs print the token count only —
+  this SDK has no per-model pricing table, so no dollar estimate.
+
+`policy` and `cedar eval` come straight off `parapetai_agent.policy.engine.
+Decision` — the same dataclass every integration this SDK ships
+(framework-neutral `Governor`, `GovernedAgent` here, `GovernedRunner` in
+the ADK version of this demo, and any future one) produces from the exact
+same `PolicyEngine.evaluate()` call. Nothing about
+`determining_policies`/`evaluation_ms` is MAF-specific — only how a DENY
+gets folded back into the agent's own response differs per framework (an
+exception here at the model-call layer, a synthetic tool-result string at
+the tool-call layer — see `example_governed.py`'s own comments), because
+that part is constrained by whatever extension point each framework
+offers. The decision data itself is generic; `example_governed.py` pulls
+it out of the same structlog `"decision"` event every framework emits
+(`_capture` in that file), not from anything framework-specific. `total`
+and `tokens` are NOT part of `Decision` at all — this demo adds them on
+top from the framework's own response object, to show governance overhead
+and usage side by side with the Cedar outcome.
+
+## Switching between cloud and local mode
+
+`example_governed.py` reads `PARAPETAI_MODE` from `.env` to decide where
+Cedar policy comes from:
+
+| `PARAPETAI_MODE` | Policy source | Needs a control plane? |
+|---|---|---|
+| `cloud` (default) | The real bundle on your Parapet control plane, fetched at startup | Yes — `PARAPETAI_AGENT_ID`/`_SECRET`/`_ACCOUNT_ID` |
+| `local` | `./policies/*.cedar` on disk, read directly, no network call | No |
+
+Two ready-made env files make swapping one command instead of hand-editing:
+
+```
+cp .env.local .env    # switch to local mode -- edit ./policies/, iterate fast
+uv run python driver.py
+
+cp .env.cloud .env    # switch back to cloud mode -- against the real agent
+uv run python driver.py
+```
+
+`.env.cloud` is a backup of your real, filled-in credentials (identical to
+what `.env` started as) — never edit it by hand, and never edit `.env`
+directly while meaning to change cloud-mode settings; edit `.env.cloud`
+and re-copy it instead, so a stray edit while testing locally can't get
+lost. `.env.local` has no secret in it at all (local mode never talks to
+the control plane), so it's safe to keep, share, or check in.
+
+`./policies/` always has two files: `00-base.cedar` (a base `permit` on
+model_call/tool_call/http_request -- CEDAR IS DEFAULT-DENY, so without
+this every tool_call denies outright, not because of the org policy;
+mirrors both a freshly provisioned agent's starter bundle and
+`parapetai_agent`'s own bundled default policy) and `40-org.cedar` (the
+exact same rule that was pushed to the control-plane bundle). Both are
+kept in sync on purpose so switching `PARAPETAI_MODE` doesn't change what's
+enforced, only where it's enforced from. Add more `.cedar` files to that
+directory to test additional rules without touching the control plane at
+all; the quickdemo skill can seed a
+few ready-made ones on generation (deny a tool outright, require an extra
+identity claim) — see `../templates/policy_library/quickdemo/` in the SDK
+repo this project was generated from, or just write your own.
+
+## Deployment
+
+Nothing in this demo is meant to be deployed as-is — it's a local
+teaching tool. If you do turn it into something you ship, watch two
+things:
+
+- **`.parapet-cache/`** (`PARAPETAI_PERSIST_POLICY_DIR` in `.env.cloud`,
+  on by default) is a disposable local debug dump of whatever bundle the
+  control plane last sent this machine — never a source of truth, and
+  stale the moment the real bundle changes. It's already in `.gitignore`;
+  make sure any build/deploy step (Docker build context, zip, CI artifact)
+  excludes it too, the same way you'd exclude `.env`/`.env.cloud`. If it
+  ends up inside a deployed image, at best it's dead weight; at worst
+  someone reads it as current policy when it isn't.
+- **`.env` / `.env.cloud`** carry a real agent secret once filled in —
+  never commit them (already gitignored) and never bake them into an
+  image; inject `PARAPETAI_AGENT_SECRET` at deploy time the way you would
+  any other credential.

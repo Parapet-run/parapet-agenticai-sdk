@@ -23,6 +23,15 @@ from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.genai import types
 
 
+# Canned, deterministic usage figures -- not real token counts, but present
+# so example_governed.py/example_no_governance.py's token/cost reporting
+# has something to show in mock mode, same as mock_model_server.py's own
+# canned `usage` block for the MAF version of this demo.
+_MOCK_USAGE = types.GenerateContentResponseUsageMetadata(
+    prompt_token_count=1, candidates_token_count=1, total_token_count=2
+)
+
+
 class MockLlm(BaseLlm):
     model: str = "mock-model"
 
@@ -44,7 +53,8 @@ class MockLlm(BaseLlm):
                 content=types.Content(
                     role="model",
                     parts=[types.Part(text=f"Here's what I found: {result}")],
-                )
+                ),
+                usage_metadata=_MOCK_USAGE,
             )
             return
 
@@ -66,5 +76,6 @@ class MockLlm(BaseLlm):
                         )
                     )
                 ],
-            )
+            ),
+            usage_metadata=_MOCK_USAGE,
         )

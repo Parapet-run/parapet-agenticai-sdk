@@ -73,8 +73,8 @@ plane at all (that's the point of the contrast), so a second, provisioned
 agent for it would have nothing to show on its page. Don't provision one.
 
 The call returns `{agent_id, secret}` — **the secret is shown exactly
-once.** Write it straight into the generated `.env` in step 6; never just
-print it and move on.
+once.** Write it straight into the generated `.env`/`.env.cloud` in step 7;
+never just print it and move on.
 
 ## 4. Push the org policy to the governed agent
 
@@ -96,33 +96,79 @@ what makes Tony denied on `hr_lookup` and Sally denied on
 
 Call `parapet_get_quickstart` if the user wants to know this deployment's
 default model / install string for the framework they picked. Not needed
-to run the demo itself — the demo mocks the model by default (step 7).
+to run the demo itself — the demo mocks the model by default (step 8).
 
-## 6. Generate the project
+## 6. Offer additional local-only test policies (optional)
+
+This is about `./policies/` in the generated project — a directory read
+straight off disk, used only when `PARAPETAI_MODE=local` (see step 7 and
+`templates/<framework>/README.md`'s "Switching between cloud and local
+mode"). It is separate from the control-plane bundle step 4 just pushed,
+and always ships two files unconditionally, not just one:
+`templates/<framework>/policies/00-base.cedar` (a base `permit` on
+model_call/tool_call/http_request — CEDAR IS DEFAULT-DENY, so without this
+every tool_call denies outright, not because of the org policy; it mirrors
+the starter bundle a freshly provisioned agent gets on the control plane)
+and `templates/<framework>/policies/40-org.cedar` (the same org policy
+pushed to that bundle in step 4). Both generated unchanged — this baseline
+is not optional, so Tony/Sally's denials look identical in both modes.
+
+Ask the user (optional, default: none selected) whether they also want any
+of these seeded into `./policies/` so they can test more restrictive rules
+purely locally, with no control-plane bundle edit and no second agent:
+
+| File (`templates/policy_library/quickdemo/`) | What it adds |
+|---|---|
+| `50-deny-salesforce.cedar` | Denies `salesforce_lookup` for everyone, including Tony |
+| `51-deny-hr.cedar` | Denies `hr_lookup` for everyone, including Sally |
+| `52-require-role-for-hr.cedar` | `hr_lookup` also needs a `role=HRManager` claim — denies Sally too, since the demo's scenarios never assert one |
+
+Read the actual file content from that directory (don't write it from
+memory) for whichever ones the user picks, and copy each selected file
+into the generated project's `./policies/` alongside `00-base.cedar` and
+`40-org.cedar` in step 7. If the user picks none, `./policies/` still gets
+those two — local mode always has at least the base permit and the org
+policy to enforce.
+
+## 7. Generate the project
 
 Read every file under `templates/<framework>/` (next to this SKILL.md)
-and write it into the target directory, unchanged, **except** `.env`:
-create it from `.env.example` with these substitutions filled in (the
-generated project has no other way to learn them):
+and write it into the target directory, unchanged, **except**:
 
-| Placeholder in `.env.example` | Value |
-|---|---|
-| `PARAPETAI_AGENT_ID` | the agent's `agent_id` (step 3) |
-| `PARAPETAI_AGENT_SECRET` | the agent's `secret` (step 3) |
-| `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 2) |
-| `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 2 |
+- `.env` and `.env.cloud`: both created from `.env.cloud.example` with
+  these substitutions filled in (the generated project has no other way
+  to learn them) — two copies because `.env` is the active file the demo
+  reads and `.env.cloud` is an untouched backup to restore cloud mode from
+  after the user has been editing `.env` for local testing (see
+  `templates/<framework>/README.md`'s "Switching between cloud and local
+  mode"):
 
-Leave `OPENAI_API_KEY` (MAF) / `GOOGLE_API_KEY` (ADK) unset — the mock
-model is the default and needs no key. Never write a real key into `.env`
-on the user's behalf; if they want a real model, tell them which line to
-edit and let them paste their own key in.
+  | Placeholder in `.env.cloud.example` | Value |
+  |---|---|
+  | `PARAPETAI_AGENT_ID` | the agent's `agent_id` (step 3) |
+  | `PARAPETAI_AGENT_SECRET` | the agent's `secret` (step 3) |
+  | `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 2) |
+  | `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 2 |
+
+  Leave `OPENAI_API_KEY` (MAF) / `GOOGLE_API_KEY` (ADK) and
+  `PARAPETAI_PERSIST_POLICY_DIR` exactly as `.env.cloud.example` has them —
+  the mock model is the default and needs no key, and the persisted-bundle
+  cache is on by default so the user can diff it against
+  `./policies/40-org.cedar` if a decision ever looks wrong. Never write a
+  real key into `.env`/`.env.cloud` on the user's behalf; if they want a
+  real model, tell them which line to edit and let them paste their own
+  key in.
+- `.env.local`: copied from `.env.local.example` completely unchanged — it
+  needs no substitutions (local mode never talks to the control plane).
+- `./policies/`: `00-base.cedar` + `40-org.cedar` (both unchanged) plus
+  whatever the user picked in step 6, if anything.
 
 Do not modify any other file's content — these were built and verified
 end to end (real framework, real mock model, real Cedar decisions against
 a live control plane) as part of this skill; the value they demonstrate
 depends on running unmodified.
 
-## 7. Run it
+## 8. Run it
 
 From the generated project directory:
 ```
@@ -130,10 +176,19 @@ uv sync   # or: python3 -m venv .venv && source .venv/bin/activate && pip instal
 uv run python driver.py
 ```
 
+The demo runs in cloud mode by default (`.env`'s `PARAPETAI_MODE=cloud`).
 Report the control-plane link `driver.py` prints at the end — tell the
 user to click it to see the org policy, the allow/deny decisions, and
 the traces for themselves. This is the payoff; don't just say "it
 worked," point at where they can verify it.
+
+If the user wants to see local mode too (no control plane, `./policies/`
+on disk instead — useful for iterating on the policies from step 6
+without pushing to the control plane each time), tell them to
+`cp .env.local .env && uv run python driver.py`, and `cp .env.cloud .env`
+to switch back. Don't do this switch for them unasked — cloud mode against
+the real, just-provisioned agent is the default experience this skill
+exists to show.
 
 ## Non-negotiables
 
