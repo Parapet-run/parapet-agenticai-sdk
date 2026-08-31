@@ -1,6 +1,9 @@
 # parapet-agenticai-sdk
 
 [![CI](https://github.com/Parapet-run/parapet-agenticai-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Parapet-run/parapet-agenticai-sdk/actions/workflows/ci.yml)
+[![Docs](https://github.com/Parapet-run/parapet-agenticai-sdk/actions/workflows/docs.yml/badge.svg)](https://parapet-run.github.io/parapet-agenticai-sdk/)
+
+📖 **[Full documentation](https://parapet-run.github.io/parapet-agenticai-sdk/)** — installation, quickstart, framework guides (MAF/ADK), the `parapetai-mcp` CLI, and the complete API reference.
 
 **In-process runtime governance for AI agents.** Wrap the agent you already
 have, and every model call and tool call becomes a [Cedar](https://www.cedarpolicy.com/)
@@ -37,6 +40,34 @@ determining policy, stage, identity, latency, policy generation. Your prompts
 and the model's responses never leave the process.
 
 ## Quickstart
+
+### Fastest path: scaffold it with Claude Code + `parapetai-mcp`
+
+If you're using [Claude Code](https://claude.com/claude-code), skip writing
+any of this by hand. `parapetai-mcp` is an MCP server that logs in to a
+control plane, provisions an agent, and either generates a runnable demo
+project from nothing or retrofits Parapet into a project you already have —
+Claude does the file edits.
+
+```bash
+pipx install parapetai-mcp
+parapetai-mcp init         # installs the parapet-* skills into .claude/skills/
+claude mcp add parapet -e PARAPETAI_CONTROL_PLANE_URL=https://app.parapet.run -- parapetai-mcp serve
+```
+
+Then, in Claude Code:
+
+- **"Build me a Parapet demo"** → the `parapet-quickdemo` skill generates a
+  small, runnable, identity-based governance project from scratch (Google
+  ADK or Microsoft Agent Framework, your choice), against a real control
+  plane you can click into.
+- **"Add Parapet to my agent"** (in an existing `agent_framework` or
+  `google.adk` project) → the `parapet-maf` / `parapet-adk` skill
+  provisions an agent and instruments your existing code.
+
+No `pipx`? `brew install pipx` (macOS) or
+`python3 -m pip install --user pipx && pipx ensurepath`. Full reference:
+[parapetai-mcp docs](https://parapet-run.github.io/parapet-agenticai-sdk/cli/parapetai-mcp/).
 
 ### Any framework — `Governor`
 
@@ -320,6 +351,12 @@ docs/                 # API + observability + architecture references, plus ADRs
 
 ## Docs
 
+📖 **[parapet-run.github.io/parapet-agenticai-sdk](https://parapet-run.github.io/parapet-agenticai-sdk/)**
+— installation, quickstart, framework guides, the `parapetai-mcp` CLI/skills
+reference, and the full `Governor` / `GovernedAgent` / `GovernedRunner` /
+`Decision` API reference, all in one hosted site. The pages below are the
+same source files, browsable directly in the repo:
+
 - [Architecture](docs/ARCHITECTURE.md) — stages, fail-closed, the trust boundary
 - [Control-plane API](docs/CONTROL_PLANE_API.md) — the HTTP protocol the SDK speaks
 - [Observability / OTel](docs/OBSERVABILITY.md) — decisions as content-free spans
@@ -331,6 +368,7 @@ docs/                 # API + observability + architecture references, plus ADRs
 
 ## Links
 
+- Docs: https://parapet-run.github.io/parapet-agenticai-sdk/
 - Source: https://github.com/Parapet-run/parapet-agenticai-sdk
 - Issues: https://github.com/Parapet-run/parapet-agenticai-sdk/issues
 
