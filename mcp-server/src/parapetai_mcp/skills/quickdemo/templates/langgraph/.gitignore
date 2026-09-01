@@ -1,0 +1,15 @@
+# Active env file and the cloud-mode backup both carry a real agent secret
+# once filled in -- never commit either. .env.local has no secret (local
+# mode never talks to the control plane) and is safe to keep tracked.
+.env
+.env.cloud
+
+# Local debug cache of the fetched control-plane bundle (PARAPETAI_PERSIST_
+# POLICY_DIR in .env.cloud.example). Regenerated on every cloud-mode run --
+# never a source of truth, never something to ship. See README.md's
+# "Deployment" section.
+.parapet-cache/
+
+.venv/
+__pycache__/
+*.py[cod]

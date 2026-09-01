@@ -13,7 +13,7 @@ install:
 test: test-sdk test-gateway
 
 test-sdk:
-	uv run --extra maf --extra adk --extra judge --extra dev pytest tests -q
+	uv run --extra maf --extra adk --extra langgraph --extra judge --extra dev pytest tests -q
 
 test-gateway:
 	uv run --package parapetai-gateway --extra dev pytest gateway/tests -q
@@ -26,7 +26,7 @@ lint:
 	uv run --extra dev ruff format --check src gateway/src
 
 typecheck:
-	uv run --extra maf --extra adk --extra judge --extra dev mypy src
+	uv run --extra maf --extra adk --extra langgraph --extra judge --extra dev mypy src
 	uv run --package parapetai-gateway --extra dev mypy gateway/src
 
 check: lint typecheck test

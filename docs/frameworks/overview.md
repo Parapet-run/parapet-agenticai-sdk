@@ -7,15 +7,16 @@ entirely on which one you're asking about — these are not the same list.
 ## In-process SDK — Python only
 
 Embeds Cedar directly in the agent's own process. Requires a Python
-adapter; today there are three:
+adapter; today there are four:
 
 | Integration | Class | Framework | Language |
 |---|---|---|---|
 | Framework-neutral | [`Governor`](../reference/governor.md) | Any (three explicit calls you place yourself) | Python |
 | Microsoft Agent Framework | [`GovernedAgent`](../reference/governed-agent.md) | `agent_framework` | Python |
 | Google ADK | [`GovernedRunner`](../reference/governed-runner.md) | `google.adk` | Python |
+| LangGraph / LangChain | [`ParapetAgentMiddleware`](../reference/langgraph.md) | `langchain` (`create_agent`) | Python |
 
-All three call the exact same `policy.engine.PolicyEngine` /
+All four call the exact same `policy.engine.PolicyEngine` /
 `policy.hooks.GovernanceHook` — the only difference is which framework's
 own extension point wires the call in, and how a denial surfaces back to
 your code (see each framework's own guide for that — it's genuinely
@@ -23,6 +24,12 @@ different per framework, not just a naming difference).
 
 **No non-Python in-process adapter exists.** If your agent isn't Python,
 or you can't modify its process, use the gateway instead.
+
+!!! note "DeepAgents"
+    `create_deep_agent()` compiles to LangGraph's own execution model, so
+    the same `ParapetAgentMiddleware` applies wherever it accepts a
+    `middleware=` list — not yet exercised by a conformance test in this
+    repo, so treat as probable, not verified, until one exists.
 
 ## Gateway PEP — language-agnostic, HTTP interception
 
@@ -93,10 +100,11 @@ mean:
 | Can you modify the agent's process? | Yes | No, or you'd rather not |
 | Language | Python only | Any (per the matrix above) |
 | Denial surfacing | Native to the framework (exception, synthetic response, etc. — see each guide) | HTTP-level (blocked request/response) |
-| Setup | `pip install parapetai-agent[maf\|adk]`, swap a class | Set a base-URL env var, run the gateway |
+| Setup | `pip install parapetai-agent[maf\|adk\|langgraph]`, swap a class (or add middleware) | Set a base-URL env var, run the gateway |
 
 ## Next
 
 - [Governor guide](governor.md) — the framework-neutral path
 - [Microsoft Agent Framework guide](maf.md)
 - [Google ADK guide](adk.md)
+- [LangGraph / LangChain guide](langgraph.md)

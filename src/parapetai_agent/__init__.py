@@ -79,6 +79,20 @@ different class would be misleading, not just a naming preference.
 re-exported at this top level (it would collide with maf.py's own,
 non-identical, ChatResponse-shaped default) -- import it from
 `parapetai_agent.adk` directly if you need ADK's specifically.
+
+`ParapetAgentMiddleware`/`parapetai_agent.langgraph.build_middleware`
+(LangGraph/LangChain's own, `langchain.agents.create_agent(...,
+middleware=[...])`-shaped) is the third framework integration, behind its
+own `langgraph` extra -- same "no forced shared name" reasoning: LangChain's
+own construction API is functional (`create_agent(model, tools,
+middleware=[...])`), not a subclassable `Agent`/`Runner`, so there is no
+`GovernedX` class here to begin with, only the middleware object itself.
+`build_middleware`/`reset_middleware_registry` are NOT re-exported at this
+top level under those bare names -- both already belong to MAF's block
+above and are a genuinely different object per module, unlike the shared
+governance_runtime/scoped_data names re-exported from every block. Reach
+LangGraph's own via `parapetai_agent.langgraph.build_middleware` /
+`parapetai_agent.reset_langgraph_middleware_registry`.
 """
 
 from __future__ import annotations
@@ -183,6 +197,55 @@ try:
         "flush_otel",
         "identity_from_bearer_token",
         "reset_plugin_registry",
+        "track_tool_denials",
+    ]
+except ImportError:
+    pass
+
+try:
+    # Same guarded-import discipline, for the `langgraph` extra -- needs
+    # the full `langchain` package (langchain.agents.middleware), not just
+    # langgraph/langchain-core -- see langgraph.py's own module docstring.
+    #
+    # `build_middleware` and `reset_middleware_registry` are NOT re-exported
+    # under those bare names here -- both already belong to the `maf` block
+    # above, and unlike the shared governance_runtime/scoped_data names
+    # below, these are a DIFFERENT object per module (a different registry,
+    # a different middleware type), not the same underlying function
+    # re-imported twice. Same resolution the adk block already uses for its
+    # own colliding `governed_identity` (see that block's comment) --
+    # keep the colliding name reachable module-qualified
+    # (`parapetai_agent.langgraph.build_middleware`) rather than picking an
+    # arbitrary winner at this top level.
+    from parapetai_agent.langgraph import ParapetAgentMiddleware as ParapetAgentMiddleware
+    from parapetai_agent.langgraph import agent_identity as agent_identity
+    from parapetai_agent.langgraph import configure_otel as configure_otel
+    from parapetai_agent.langgraph import (
+        configure_rotating_audit_log as configure_rotating_audit_log,
+    )
+    from parapetai_agent.langgraph import current_identity as current_identity
+    from parapetai_agent.langgraph import flush_otel as flush_otel
+    from parapetai_agent.langgraph import identity_from_bearer_token as identity_from_bearer_token
+    from parapetai_agent.langgraph import (
+        reset_middleware_registry as reset_langgraph_middleware_registry,
+    )
+    from parapetai_agent.langgraph import track_tool_denials as track_tool_denials
+
+    # governed_identity deliberately NOT re-exported here either -- same
+    # reasoning as the adk block's own comment above.
+    # parapetai_agent.langgraph.governed_identity is still reachable
+    # directly (scoped_data's base version, no `credential=`, same as
+    # ADK's).
+
+    __all__ += [
+        "ParapetAgentMiddleware",
+        "agent_identity",
+        "configure_otel",
+        "configure_rotating_audit_log",
+        "current_identity",
+        "flush_otel",
+        "identity_from_bearer_token",
+        "reset_langgraph_middleware_registry",
         "track_tool_denials",
     ]
 except ImportError:

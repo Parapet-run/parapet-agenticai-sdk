@@ -59,8 +59,8 @@ Then, in Claude Code:
 
 - **"Build me a Parapet demo"** → the `parapet-quickdemo` skill generates a
   small, runnable, identity-based governance project from scratch (Google
-  ADK or Microsoft Agent Framework, your choice), against a real control
-  plane you can click into.
+  ADK, Microsoft Agent Framework, or LangGraph/LangChain — your choice),
+  against a real control plane you can click into.
 - **"Add Parapet to my agent"** (in an existing `agent_framework` or
   `google.adk` project) → the `parapet-maf` / `parapet-adk` skill
   provisions an agent and instruments your existing code.

@@ -1,6 +1,6 @@
 ---
 name: parapet-quickdemo
-description: Use when the user wants to see Parapet work end to end without an existing project -- "build me a Parapet demo", "show me governance in action", "generate an example governed agent", or when parapet_getting_started's menu option 1 is picked. Generates a runnable, self-contained project demonstrating identity-based tool access (two people in different orgs, one tool each) for either Google ADK or Microsoft Agent Framework, with a mock model by default and a real Parapet control plane behind it. Requires the parapet MCP server (parapetai-mcp) to be connected. Distinct from parapet-adk/parapet-maf, which retrofit an EXISTING project -- this skill creates a new one from nothing.
+description: Use when the user wants to see Parapet work end to end without an existing project -- "build me a Parapet demo", "show me governance in action", "generate an example governed agent", or when parapet_getting_started's menu option 1 is picked. Generates a runnable, self-contained project demonstrating identity-based tool access (two people in different orgs, one tool each) for Google ADK, Microsoft Agent Framework, or LangGraph/LangChain, with a mock model by default and a real Parapet control plane behind it. Requires the parapet MCP server (parapetai-mcp) to be connected. Distinct from parapet-adk/parapet-maf, which retrofit an EXISTING project -- this skill creates a new one from nothing.
 ---
 
 # Parapet quickdemo: identity-based governance, from nothing
@@ -20,11 +20,25 @@ directory the user names.
 
 ## 0. Ask which framework, before generating anything
 
-Ask the user directly: **Google ADK or Microsoft Agent Framework?**
-(A third option, AWS Bedrock AgentCore, does not have a Parapet SDK
+Ask the user directly: **Google ADK, Microsoft Agent Framework, or
+LangGraph/LangChain?** The three map to this skill's three template
+directories exactly by name — `adk`, `maf`, `langgraph` — used
+throughout the rest of this file as `<framework>`.
+
+(A fourth option, AWS Bedrock AgentCore, does not have a Parapet SDK
 integration yet — if asked for it, say so plainly and stop; do not
-generate an ADK or MAF project and call it AgentCore, and do not
+generate an ADK/MAF/LangGraph project and call it AgentCore, and do not
 improvise an integration that doesn't exist in `parapetai-agent`.)
+
+The LangGraph option generates a project built on `ParapetAgentMiddleware`
+(`langchain.agents.create_agent(..., middleware=[...])`) — unlike the ADK/
+MAF versions, a denied call there **raises** `GovernanceDenied` rather than
+degrading into a synthetic response; `templates/langgraph/example_governed.py`'s
+own module docstring explains why. Its `pyproject.toml` also needs a
+`parapetai-agent` release that ships the `langgraph` extra — if
+provisioning/generation works but `uv sync` in the generated project fails
+to resolve that extra, say so plainly rather than silently downgrading the
+pin or improvising a workaround.
 
 Also ask where to generate the project (a directory name/path) if the
 user hasn't already said.
@@ -150,7 +164,7 @@ and write it into the target directory, unchanged, **except**:
   | `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 2) |
   | `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 2 |
 
-  Leave `OPENAI_API_KEY` (MAF) / `GOOGLE_API_KEY` (ADK) and
+  Leave `OPENAI_API_KEY` (MAF/LangGraph) / `GOOGLE_API_KEY` (ADK) and
   `PARAPETAI_PERSIST_POLICY_DIR` exactly as `.env.cloud.example` has them —
   the mock model is the default and needs no key, and the persisted-bundle
   cache is on by default so the user can diff it against

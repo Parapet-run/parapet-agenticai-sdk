@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0]
+
+### Added
+- **LangGraph / LangChain integration.** `parapetai_agent.langgraph`
+  (`langgraph` extra): `ParapetAgentMiddleware` / `build_middleware()`, a
+  real `langchain.agents.middleware.AgentMiddleware` for
+  `langchain.agents.create_agent(..., middleware=[...])`. Governs
+  pre-model, tool-call, and post-model Cedar decisions with genuine
+  construction-time blocking (verified live against
+  `langchain==1.3.18`/`langgraph==1.2.11`), plus ambient identity via the
+  same `governed_identity()` MAF/ADK already use. See
+  `docs/frameworks/langgraph.md`. No `alter_transforms=`/ALTER support yet
+  (tracked as a known gap in the module's own docstring).
+
 ## [0.4.2]
 
 No functional changes. Release-pipeline verification (tag → build → PyPI

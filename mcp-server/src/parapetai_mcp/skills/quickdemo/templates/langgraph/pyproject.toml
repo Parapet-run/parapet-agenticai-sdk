@@ -1,0 +1,21 @@
+[project]
+name = "parapet-quickdemo-langgraph"
+version = "0.1.0"
+description = "Parapet quickdemo: Sales vs HR identity-based tool access, LangGraph / LangChain"
+requires-python = ">=3.12"
+dependencies = [
+    # Needs a parapetai-agent release that ships the `langgraph` extra
+    # (parapetai_agent.langgraph / ParapetAgentMiddleware) -- if `uv sync`
+    # reports no such extra, upgrade parapetai-agent.
+    "parapetai-agent[langgraph]>=0.5,<1.0",
+    # Not a parapetai-agent[langgraph] dependency itself (that extra only
+    # needs the full `langchain` package) -- this demo's mock_model_server.py
+    # is an OpenAI-compatible HTTP stand-in, so langchain-openai's ChatOpenAI
+    # is what talks to it, same as agent_framework's
+    # OpenAIChatCompletionClient does in the MAF version of this demo.
+    "langchain-openai>=1.4,<2.0",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+package = false

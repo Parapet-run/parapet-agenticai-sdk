@@ -11,6 +11,34 @@ pip install parapetai-agent
 python examples/authorize_tool_calls.py
 ```
 
+## LangGraph / LangChain — `langgraph_middleware.py` and two older examples
+
+`parapetai_agent.langgraph.ParapetAgentMiddleware` is the dedicated
+adapter (see `docs/frameworks/langgraph.md`) — a real
+`langchain.agents.middleware.AgentMiddleware` for `langchain.agents.
+create_agent(..., middleware=[...])`, covering pre-model, tool-call, and
+post-model Cedar decisions plus ambient identity in one registration:
+
+```bash
+pip install "parapetai-agent[langgraph]"
+python examples/langgraph_middleware.py
+```
+
+Two earlier examples remain, showing the framework-neutral `Governor`
+fallback the adapter above now supersedes in capability (still valid if
+you want `create_react_agent` or the lighter `langchain-core`-only
+dependency footprint):
+
+```bash
+pip install parapetai-agent langgraph
+python examples/langgraph_tool_calling.py     # all 3 stages, wired by hand: check_input/@gov.tool/check_output
+python examples/langgraph_identity_scoped.py  # role-scoped via RunnableConfig, no ambient identity
+```
+
+No model key, no network — all three use a scripted
+`langchain_core.language_models.fake_chat_models.GenericFakeChatModel`, and
+all three reuse this directory's own `../policies` fixtures.
+
 ## Governing a real agent
 
 Wrap a Microsoft Agent Framework agent (needs the `maf` extra and a model

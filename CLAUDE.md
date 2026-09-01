@@ -31,7 +31,8 @@ the agent process:
 
 ```
 Can embed?  --embed--> parapetai-agent (this repo's src/)
-                        Governor / GovernedAgent / GovernedRunner
+                        Governor / GovernedAgent / GovernedRunner /
+                        ParapetAgentMiddleware
                         runs Cedar IN the agent's own process
 
 Can't?      --proxy---> parapetai-gateway (this repo's gateway/)
@@ -72,12 +73,14 @@ response (only if every gate allowed)
 Each gate is one Cedar decision; between gates only booleans/metadata move —
 never the content being judged. Full narrative: `docs/ARCHITECTURE.md`.
 
-### Three integration paths into the SDK, one engine
+### Four integration paths into the SDK, one engine
 
 - **`Governor`** (`src/parapetai_agent/govern.py`) — framework-neutral: three
   explicit calls (`check_input` / `authorize_tool` / `check_output`) any loop
-  can make. No adapter, no framework dependency. This is what LangGraph,
-  CrewAI, the OpenAI Agents SDK, or a bare `while` loop use.
+  can make. No adapter, no framework dependency. This is what CrewAI, the
+  OpenAI Agents SDK, or a bare `while` loop use, and what LangGraph/
+  LangChain used before `ParapetAgentMiddleware` existed — still valid for
+  `create_react_agent` or a lighter `langchain-core`-only footprint.
 - **`GovernedAgent` / `build_middleware`** (`src/parapetai_agent/maf.py`,
   `maf` extra) — Microsoft Agent Framework. `GovernedAgent` subclasses
   `agent_framework.Agent`; the governable seam is `Agent(middleware=[...])`.
@@ -89,13 +92,33 @@ never the content being judged. Full narrative: `docs/ARCHITECTURE.md`.
   `InMemoryGovernedRunner` mirrors `google.adk.runners.InMemoryRunner` for
   callers who'd otherwise hit a `TypeError` wiring session/artifact/memory
   services by hand.
+- **`ParapetAgentMiddleware` / `build_middleware`**
+  (`src/parapetai_agent/langgraph.py`, `langgraph` extra) — LangGraph /
+  LangChain. A real `langchain.agents.middleware.AgentMiddleware` for
+  `langchain.agents.create_agent(..., middleware=[...])` (the current,
+  non-deprecated construction API — `langgraph.prebuilt.create_react_agent`
+  predates `middleware=` support and can't block a call). Governs
+  pre-model, tool-call, and post-model stages via `wrap_model_call`/
+  `wrap_tool_call`'s `handler` callable, the same "raise before calling the
+  real thing" shape MAF's `ChatMiddleware`/`FunctionMiddleware` use. No
+  subclassable `Agent`/`Runner` here — `create_agent` is functional, so the
+  middleware object itself is the whole integration surface, not a
+  `GovernedX` class. `build_middleware`/`reset_middleware_registry` are
+  NOT re-exported at the package's top level under those bare names (MAF's
+  own versions already own them there and are a different object) — reach
+  the langgraph ones as `parapetai_agent.langgraph.build_middleware` /
+  `parapetai_agent.reset_langgraph_middleware_registry`. No
+  `alter_transforms=`/ALTER support yet, unlike `maf`/`adk` — see
+  `langgraph.py`'s own module docstring for the current, complete list of
+  known gaps versus those two.
 
-`maf` and `adk` are mutually independent extras — installing one never pulls
-in the other's framework SDK. Both source identity (`scoped_data.py`) and the
-audit/OTel/registry plumbing (`governance_runtime.py`) from the same shared
-modules, so switching frameworks doesn't mean relearning identity code.
-`GovernanceDenied` (`_exceptions.py`) is catchable without importing any
-framework. `GovernanceReviewRequired` (see REVIEW below) subclasses it.
+`maf`, `adk`, and `langgraph` are mutually independent extras — installing
+one never pulls in another's framework SDK. All three source identity
+(`scoped_data.py`) and the audit/OTel/registry plumbing
+(`governance_runtime.py`) from the same shared modules, so switching
+frameworks doesn't mean relearning identity code. `GovernanceDenied`
+(`_exceptions.py`) is catchable without importing any framework.
+`GovernanceReviewRequired` (see REVIEW below) subclasses it.
 
 ### REVIEW — a third decision outcome, not just allow/deny
 
@@ -149,6 +172,7 @@ from `src/parapetai_agent/policy/engine.py`'s own header and `docs/adr/`.
 |---|---|---|
 | `maf` | `agent-framework`, `mcp`, OTel SDK + OTLP exporter | Microsoft Agent Framework integration and OTel export |
 | `adk` | `google-adk`, OTel SDK + OTLP exporter | Google ADK integration and OTel export |
+| `langgraph` | `langchain`, OTel SDK + OTLP exporter | LangGraph/LangChain integration (`ParapetAgentMiddleware`) and OTel export |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction |
 | `judge` | `litellm` | Provider-agnostic SLM-judge backend (Anthropic, Bedrock, Vertex, Groq, Ollama). Not needed for the default `slm` backend. |
 | `dev` | `pytest`, `ruff`, `mypy`, ... | Local dev / CI only |
@@ -175,7 +199,7 @@ with `ModuleNotFoundError: parapetai_gateway`.
 ```bash
 make install        # uv sync --all-extras
 make test            # test-sdk + test-gateway
-make test-sdk         # uv run --extra maf --extra adk --extra judge --extra dev pytest tests -q
+make test-sdk         # uv run --extra maf --extra adk --extra langgraph --extra judge --extra dev pytest tests -q
 make test-gateway      # uv run --package parapetai-gateway --extra dev pytest gateway/tests -q
 make lint              # ruff check (src, tests, gateway/src, gateway/tests, AND examples/ deliberately)
 make typecheck          # mypy --strict on src and gateway/src
@@ -187,8 +211,8 @@ make docs                   # build the docs site (mkdocs build --strict); make 
 Single test:
 
 ```bash
-uv run --extra maf --extra adk --extra judge --extra dev pytest tests/test_adk.py -v
-uv run --extra maf --extra adk --extra judge --extra dev pytest tests -k "GovernedAgent and not live" -v
+uv run --extra maf --extra adk --extra langgraph --extra judge --extra dev pytest tests/test_adk.py -v
+uv run --extra maf --extra adk --extra langgraph --extra judge --extra dev pytest tests -k "GovernedAgent and not live" -v
 uv run --package parapetai-gateway --extra dev pytest gateway/tests/test_streaming.py -v
 ```
 

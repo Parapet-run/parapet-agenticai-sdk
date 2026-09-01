@@ -91,6 +91,7 @@ nav:
       - Governor (framework-neutral): frameworks/governor.md
       - Microsoft Agent Framework: frameworks/maf.md
       - Google ADK: frameworks/adk.md
+      - LangGraph / LangChain: frameworks/langgraph.md
   - CLI & MCP server:
       - parapetai-mcp: cli/parapetai-mcp.md
       - MCP tools: cli/mcp-tools.md
@@ -99,6 +100,7 @@ nav:
       - Governor: reference/governor.md
       - GovernedAgent: reference/governed-agent.md
       - GovernedRunner: reference/governed-runner.md
+      - ParapetAgentMiddleware: reference/langgraph.md
       - governed_identity: reference/governed-identity.md
       - Decision: reference/decision.md
       - Exceptions: reference/exceptions.md

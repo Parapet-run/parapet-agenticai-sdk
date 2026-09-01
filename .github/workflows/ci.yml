@@ -28,6 +28,13 @@ jobs:
           # Pin the tested agent-framework line for deterministic CI; the public
           # compatibility range in pyproject stays broad (>=1.13,<2.0).
           uv pip install "agent-framework==1.13.0"
+          # langchain-openai is NOT a parapetai-agent[langgraph] dependency
+          # (parapetai_agent.langgraph never imports it) -- it's needed only
+          # by tests/test_conformance_frameworks.py's TestLangGraph, which
+          # exercises the framework-neutral Governor fallback against a real
+          # ChatOpenAI. Without this pin that test class silently skips via
+          # pytest.importorskip, same as it always has in CI until now.
+          uv pip install "langchain-openai>=1.4,<2.0"
 
       # `make check` is lint + typecheck + test across BOTH packages, so CI
       # runs exactly what a contributor runs locally -- one definition, no

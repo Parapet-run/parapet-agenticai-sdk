@@ -44,16 +44,17 @@ in.
 |---|---|---|
 | `maf` | `agent-framework`, `mcp`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Microsoft Agent Framework integration ([`GovernedAgent`](reference/governed-agent.md)) and OTel export to the control plane. |
 | `adk` | `google-adk`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Google ADK integration ([`GovernedRunner`](reference/governed-runner.md)) and OTel export. |
+| `langgraph` | `langchain`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | LangGraph / LangChain integration ([`ParapetAgentMiddleware`](reference/langgraph.md)) and OTel export. The full `langchain` package, not just `langgraph`/`langchain-core` — `AgentMiddleware` lives in `langchain.agents.middleware`. |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction for HTTP-fronted agents. |
 | `judge` | `litellm` | Provider-agnostic SLM-judge backend (Anthropic, Bedrock, Vertex, Groq, Ollama). Not needed for the default `slm` backend. |
 | `dev` | `pytest`, `pytest-asyncio`, `respx`, `ruff`, `mypy`, `opentelemetry-sdk` | Local development / CI only. |
 | `docs` | `mkdocs`, `mkdocs-material` | Building this documentation site. Local development / CI only. |
 
-`maf` and `adk` are mutually independent — installing one never pulls in
-the other's framework SDK. Both source identity (`scoped_data.py`) and the
-audit/OTel/registry plumbing (`governance_runtime.py`) from the same
-shared modules, so switching frameworks doesn't mean relearning identity
-code.
+`maf`, `adk`, and `langgraph` are mutually independent — installing one
+never pulls in the others' framework SDK. All three source identity
+(`scoped_data.py`) and the audit/OTel/registry plumbing
+(`governance_runtime.py`) from the same shared modules, so switching
+frameworks doesn't mean relearning identity code.
 
 ### Not a declared extra, on purpose
 
