@@ -1,6 +1,6 @@
 [project]
 name = "parapetai-agent"
-version = "0.5.0"
+version = "0.6.0"
 requires-python = ">=3.12"
 description = "Open-source in-process governance for AI agent frameworks: Cedar-governed model/tool calls via build_middleware()/GovernedAgent, plus the Cedar engine, request/decision shapes, PEP<->control-plane protocol client, and Ed25519 PEP identity they run on."
 readme = "README.md"

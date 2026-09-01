@@ -238,8 +238,11 @@ from parapetai_agent.governance_runtime import (
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.otel import openinference as oi
+from parapetai_agent.policy.cost_tracker import CostTracker
+from parapetai_agent.policy.cost_tracker import span_ids as _span_ids
 from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_agent.policy.hooks import GovernanceHook
+from parapetai_agent.policy.pricing import estimate_cost_usd_micros
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.response_judge import JudgeConfig
 from parapetai_agent.scoped_data import (
@@ -353,6 +356,18 @@ _current_chat: contextvars.ContextVar[_ChatCorrelation | None] = contextvars.Con
 )
 
 _PREVIEW_CHARS = 2000
+
+# COST-TRACK-1 (docs/adr/0010): cumulative token/cost totals for a
+# model_call's trace and its own "span" (that model_call plus whatever
+# tool_call(s) it triggers -- see the ADR for why that's the scope, not an
+# arbitrary OTel subtree). One process-wide instance, same posture as
+# _tracer above: trace_id is already globally unique, so sharing across
+# every GovernedAgent/build_middleware() caller in this process is safe.
+# span_ids() (trace_id/span_id as hex, or None for a no-op tracer's invalid
+# context -- configure_otel() never called, see the trace.get_tracer()
+# comment above) is shared with adk.py via policy/cost_tracker.py rather
+# than each adapter formatting its own hex convention.
+_cost_tracker = CostTracker()
 
 
 def identity_from_azure_credential(
@@ -764,7 +779,19 @@ class ParapetChatMiddleware(ChatMiddleware):
                 )
                 span.set_status(Status(StatusCode.ERROR, denial.reason))
                 raise GovernanceDenied(denial)
-            extra_context = content_result.context if content_result else None
+            extra_context = content_result.context if content_result else {}
+            # COST-TRACK-1: cumulative totals so far (NOT including this call --
+            # its own usage isn't known until the response comes back below).
+            # scope_id is this model_call's OWN span id: the "span" scope for
+            # this whole turn (this call plus any tool_call(s) it goes on to
+            # trigger, correlated via `correlation.span_context` below) is
+            # keyed off of it, not invented as a separate id.
+            span_ids = _span_ids(span.get_span_context())
+            trace_id, scope_id = span_ids if span_ids else (None, None)
+            extra_context = {
+                **extra_context,
+                **_cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id),
+            }
             pre = self.hook.evaluate(
                 snapshot=snapshot, stage="pre", principal=principal, extra_context=extra_context
             )
@@ -779,14 +806,45 @@ class ParapetChatMiddleware(ChatMiddleware):
                 # _register_stream_audit_hook's own docstring for why this
                 # can never block or rewrite what already streamed.
                 self._register_stream_audit_hook(
-                    context, principal, correlation, identity_claims, identity_roles
+                    context,
+                    principal,
+                    correlation,
+                    identity_claims,
+                    identity_roles,
+                    trace_id,
+                    scope_id,
                 )
                 return
 
             chat_response = context.result
             if not isinstance(chat_response, ChatResponse):
                 return  # an earlier middleware already overrode/denied -- nothing of ours to check
-            _set_oi_attributes(span, _token_count_attributes(chat_response.usage_details))
+            token_attrs = _token_count_attributes(chat_response.usage_details)
+            _set_oi_attributes(span, token_attrs)
+            # COST-TRACK-1: this call's usage is known now (it wasn't at the
+            # pre-call context_for() above) -- record it against the SAME
+            # (trace_id, scope_id) so the next call in this trace/turn sees
+            # an up-to-date cumulative total. A model with no priced rate
+            # still credits tokens (real, known) while cost_usd_micros stays
+            # 0 for it -- see pricing.py's estimate_cost_usd_micros docstring
+            # for why that's None-coalesced to 0 here rather than skipped:
+            # an unpriced model's token spend should still count toward a
+            # TOKEN budget even though it can't contribute to a DOLLAR one.
+            if trace_id is not None:
+                prompt_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_PROMPT, 0)
+                completion_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_COMPLETION, 0)
+                total_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_TOTAL, 0) or (
+                    prompt_tok + completion_tok
+                )
+                cost_micros = (
+                    estimate_cost_usd_micros(correlation.model, prompt_tok, completion_tok) or 0
+                )
+                _cost_tracker.record(
+                    trace_id=trace_id,
+                    scope_id=scope_id,
+                    tokens=total_tok,
+                    cost_usd_micros=cost_micros,
+                )
             if _log_content_enabled():
                 _set_oi_attributes(span, {oi.LLM_OUTPUT_MESSAGES: chat_response.text})
             response_snapshot = Snapshot(
@@ -804,7 +862,13 @@ class ParapetChatMiddleware(ChatMiddleware):
             # is ever evaluated, so an absent groundedness key can never read as
             # "grounded". The verdict is a flat bool merged into the post
             # context; the response/source text never leaves this process.
-            post_context: dict[str, Any] = {}
+            # COST-TRACK-1: seeded with the cumulative totals AFTER this
+            # call's own usage was just recorded above, so a post-stage
+            # policy (e.g. ALTER once a turn crosses a token budget) sees
+            # the up-to-date picture, not the pre-call snapshot.
+            post_context: dict[str, Any] = _cost_tracker.context_for(
+                trace_id=trace_id, scope_id=scope_id
+            )
             if self._groundedness is not None and self._groundedness.active:
                 # FALSE-POSITIVE GUARD. Groundedness asks "is this answer
                 # supported by its SOURCE?" -- and the source is the retrieval /
@@ -864,6 +928,8 @@ class ParapetChatMiddleware(ChatMiddleware):
         correlation: _ChatCorrelation,
         identity_claims: dict[str, str],
         identity_roles: list[str],
+        trace_id: str | None,
+        scope_id: str | None,
     ) -> None:
         """MAF only wires context.stream_result_hooks onto the returned
         ResponseStream AFTER this middleware's process() has fully
@@ -889,9 +955,33 @@ class ParapetChatMiddleware(ChatMiddleware):
         False, so _set_oi_attributes would be a silent no-op here -- token
         counts/output_messages for a STREAMING call are therefore not
         attached to a span at all, a real, documented gap versus the
-        non-streaming path, not an oversight."""
+        non-streaming path, not an oversight.
+
+        COST-TRACK-1 is NOT subject to that gap: trace_id/scope_id are
+        SpanContext data captured before the span ended (they don't need a
+        still-recording span, unlike _set_oi_attributes), and `finalized`
+        below carries its own usage_details same as the non-streaming
+        ChatResponse -- so cumulative cost tracking stays accurate across a
+        streaming call even though its span never gets token-count
+        attributes."""
 
         async def _audit_finalized(finalized: ChatResponse) -> ChatResponse:
+            if trace_id is not None:
+                token_attrs = _token_count_attributes(finalized.usage_details)
+                prompt_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_PROMPT, 0)
+                completion_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_COMPLETION, 0)
+                total_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_TOTAL, 0) or (
+                    prompt_tok + completion_tok
+                )
+                cost_micros = (
+                    estimate_cost_usd_micros(correlation.model, prompt_tok, completion_tok) or 0
+                )
+                _cost_tracker.record(
+                    trace_id=trace_id,
+                    scope_id=scope_id,
+                    tokens=total_tok,
+                    cost_usd_micros=cost_micros,
+                )
             response_snapshot = Snapshot(
                 provider=correlation.provider,
                 endpoint="in-process:maf:model_call",
@@ -983,7 +1073,21 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                     span, {oi.TOOL_PARAMETERS: json.dumps(snapshot.tool_args, default=str)}
                 )
             principal = _effective_principal(self.caller)
-            pre = self.hook.evaluate(snapshot=snapshot, stage="pre", principal=principal)
+            # COST-TRACK-1: scope_id is the TRIGGERING model_call's own span
+            # id (via `chat`, the SAME correlation that links this tool_call
+            # span to it as a child -- see the docstring above) so a tool
+            # call accumulates into the SAME "turn" total as the model_call
+            # that requested it, not a scope of its own. Falls back to this
+            # span's own id only for a tool_call with no correlated
+            # model_call at all (chat is a fresh default _ChatCorrelation()).
+            own_ids = _span_ids(span.get_span_context())
+            trace_id, own_span_id = own_ids if own_ids else (None, None)
+            correlated_ids = _span_ids(chat.span_context) if chat.span_context else None
+            scope_id = correlated_ids[1] if correlated_ids else own_span_id
+            cost_context = _cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id)
+            pre = self.hook.evaluate(
+                snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
+            )
             if not pre.decision.allowed:
                 span.set_status(Status(StatusCode.ERROR, pre.decision.reason))
                 _record_tool_denial(pre.decision.reason)
@@ -1004,7 +1108,18 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
             )
-            post = self.hook.evaluate(snapshot=response_snapshot, stage="post", principal=principal)
+            # Tool calls consume no LLM tokens of their own, so nothing is
+            # recorded here (record() is a model_call-only concern) -- but
+            # the cumulative totals a tool_call's own DENY/ALTER decision
+            # reasons about should still reflect the model_call that just
+            # preceded it, hence re-reading (not re-using the pre-call
+            # value, which is already stale by the time call_next() returns).
+            post = self.hook.evaluate(
+                snapshot=response_snapshot,
+                stage="post",
+                principal=principal,
+                extra_context=_cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id),
+            )
             if not post.decision.allowed:
                 span.set_status(Status(StatusCode.ERROR, post.decision.reason))
                 _record_tool_denial(post.decision.reason)

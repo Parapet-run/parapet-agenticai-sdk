@@ -176,8 +176,11 @@ from parapetai_agent.governance_runtime import (
 )
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.otel import openinference as oi
+from parapetai_agent.policy.cost_tracker import CostTracker
+from parapetai_agent.policy.cost_tracker import span_ids as _span_ids
 from parapetai_agent.policy.engine import Decision, PolicyEngine
 from parapetai_agent.policy.hooks import GovernanceHook
+from parapetai_agent.policy.pricing import estimate_cost_usd_micros
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.scoped_data import agent_identity as agent_identity
 from parapetai_agent.scoped_data import current_identity as current_identity
@@ -193,6 +196,14 @@ log = structlog.get_logger(__name__)
 # `_tracer = trace.get_tracer(__name__)` -- see that module's own comment on
 # why this is safe to call at import time, before configure_otel() has run.
 _tracer = trace.get_tracer(__name__)
+
+# COST-TRACK-1 (docs/adr/0010): same cumulative token/cost tracking as
+# maf.py, one process-wide instance -- trace_id is already globally unique,
+# so sharing across every ParapetPlugin/Runner in this process is safe.
+# Unlike maf.py, ADK gives us a real "invocation ended" hook
+# (after_run_callback below), so this adapter calls end_trace() explicitly
+# rather than relying solely on the tracker's own LRU bound.
+_cost_tracker = CostTracker()
 
 _PREVIEW_CHARS = 2000
 
@@ -433,6 +444,23 @@ class _ModelCorrelation:
     partial_text: list[str] = field(default_factory=list)
 
 
+def _tool_call_cost_ids(
+    correlation: _ModelCorrelation, tool_span: Span
+) -> tuple[str | None, str | None]:
+    """(trace_id, scope_id) for a tool_call's COST_TRACK-1 context -- shared
+    by before_tool_callback and after_tool_callback so the two derive the
+    exact same keys rather than each re-implementing the correlated/
+    fallback logic. scope_id is the triggering model_call's own span id
+    (correlation.span_context) when one exists; falls back to the
+    tool_call's own span id only when tool_context carried no correlated
+    model_call (correlation is a bare fallback _ModelCorrelation())."""
+    correlated = _span_ids(correlation.span_context) if correlation.span_context else None
+    own = _span_ids(tool_span.get_span_context())
+    trace_id, own_span_id = own if own else (None, None)
+    scope_id = correlated[1] if correlated else own_span_id
+    return trace_id, scope_id
+
+
 class ParapetPlugin(BasePlugin):
     """Cedar governance for every model_call/tool_call an ADK Runner
     drives -- registered once via Runner(plugins=[...]), covering every
@@ -547,8 +575,18 @@ class ParapetPlugin(BasePlugin):
             span.end()
             self._model_correlations.pop(invocation_id, None)
             return _denied_llm_response(denial)
-        extra_context = content_result.context if content_result else None
-
+        extra_context = content_result.context if content_result else {}
+        # COST-TRACK-1: cumulative totals so far (not including this call --
+        # its usage isn't known until after_model_callback below). scope_id
+        # is this model_call's OWN span id: the "turn" scope (this call plus
+        # whatever tool_call(s) it triggers) is keyed off it, same
+        # definition maf.py uses.
+        ids = _span_ids(span.get_span_context())
+        trace_id, scope_id = ids if ids else (None, None)
+        extra_context = {
+            **extra_context,
+            **_cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id),
+        }
         pre = self.hook.evaluate(
             snapshot=snapshot, stage="pre", principal=principal, extra_context=extra_context
         )
@@ -582,11 +620,37 @@ class ParapetPlugin(BasePlugin):
 
         span = correlation.span
         accumulated = "".join(correlation.partial_text)
+        ids = _span_ids(correlation.span_context) if correlation.span_context else None
+        trace_id, scope_id = ids if ids else (None, None)
         try:
+            token_attrs: dict[str, int] = {}
             if span is not None:
-                _set_oi_attributes(span, _token_count_attributes(llm_response.usage_metadata))
+                token_attrs = _token_count_attributes(llm_response.usage_metadata)
+                _set_oi_attributes(span, token_attrs)
                 if _log_content_enabled():
                     _set_oi_attributes(span, {oi.LLM_OUTPUT_MESSAGES: accumulated})
+            # COST-TRACK-1: this call's usage is known now -- record it
+            # against the SAME (trace_id, scope_id) the pre-call context_for()
+            # above read from, so the next call in this trace/turn sees an
+            # up-to-date cumulative total. See maf.py's identical comment for
+            # why an unpriced model still credits tokens (cost_usd_micros
+            # stays 0 for it, never skipped -- an unpriced call must still
+            # count toward a TOKEN budget).
+            if trace_id is not None:
+                prompt_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_PROMPT, 0)
+                completion_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_COMPLETION, 0)
+                total_tok = token_attrs.get(oi.LLM_TOKEN_COUNT_TOTAL, 0) or (
+                    prompt_tok + completion_tok
+                )
+                cost_micros = (
+                    estimate_cost_usd_micros(correlation.model, prompt_tok, completion_tok) or 0
+                )
+                _cost_tracker.record(
+                    trace_id=trace_id,
+                    scope_id=scope_id,
+                    tokens=total_tok,
+                    cost_usd_micros=cost_micros,
+                )
 
             response_snapshot = Snapshot(
                 provider=correlation.provider,
@@ -598,8 +662,14 @@ class ParapetPlugin(BasePlugin):
                 identity_claims=correlation.identity_claims,
                 identity_roles=correlation.identity_roles,
             )
+            # Seeded with the JUST-updated cumulative totals so a post-stage
+            # policy (e.g. ALTER once a turn crosses a budget) sees this
+            # call's own usage, not the pre-call snapshot.
             post = self.hook.evaluate(
-                snapshot=response_snapshot, stage="post", principal=correlation.principal
+                snapshot=response_snapshot,
+                stage="post",
+                principal=correlation.principal,
+                extra_context=_cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id),
             )
             if not post.decision.allowed:
                 if span is not None:
@@ -652,7 +722,19 @@ class ParapetPlugin(BasePlugin):
             identity_claims=correlation.identity_claims,
             identity_roles=correlation.identity_roles,
         )
-        pre = self.hook.evaluate(snapshot=snapshot, stage="pre", principal=correlation.principal)
+        # COST-TRACK-1: scope_id is the TRIGGERING model_call's own span id
+        # (via `correlation`, the SAME link this tool_call span was parented
+        # to above) so this tool call accumulates into the SAME "turn" total
+        # as the model_call that requested it -- falls back to this
+        # tool_call's own span id only when there was no correlated
+        # model_call at all (the `or _ModelCorrelation(...)` default above).
+        trace_id, scope_id = _tool_call_cost_ids(correlation, span)
+        pre = self.hook.evaluate(
+            snapshot=snapshot,
+            stage="pre",
+            principal=correlation.principal,
+            extra_context=_cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id),
+        )
         if not pre.decision.allowed:
             span.set_status(Status(StatusCode.ERROR, pre.decision.reason))
             _record_tool_denial(pre.decision.reason)
@@ -691,8 +773,12 @@ class ParapetPlugin(BasePlugin):
                 identity_claims=correlation.identity_claims,
                 identity_roles=correlation.identity_roles,
             )
+            trace_id, scope_id = _tool_call_cost_ids(correlation, span) if span else (None, None)
             post = self.hook.evaluate(
-                snapshot=response_snapshot, stage="post", principal=correlation.principal
+                snapshot=response_snapshot,
+                stage="post",
+                principal=correlation.principal,
+                extra_context=_cost_tracker.context_for(trace_id=trace_id, scope_id=scope_id),
             )
             if not post.decision.allowed:
                 if span is not None:
