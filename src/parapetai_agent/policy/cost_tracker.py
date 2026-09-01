@@ -57,6 +57,7 @@ def span_ids(span_context: SpanContext) -> tuple[str, str] | None:
         return None
     return format(span_context.trace_id, "032x"), format(span_context.span_id, "016x")
 
+
 # Cap on distinct trace_ids tracked at once -- oldest (by last-touched, not
 # creation) evicted first once exceeded. Bounds memory in a long-lived
 # server process without needing every caller to remember to clean up.

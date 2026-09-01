@@ -104,7 +104,7 @@ def estimate_cost_usd_micros(
     rate = price_for(model)
     if rate is None:
         return None
-    cost_usd = (prompt_tokens / 1_000_000) * rate["input"] + (
-        completion_tokens / 1_000_000
-    ) * rate["output"]
+    cost_usd = (prompt_tokens / 1_000_000) * rate["input"] + (completion_tokens / 1_000_000) * rate[
+        "output"
+    ]
     return round(cost_usd * 1_000_000)
