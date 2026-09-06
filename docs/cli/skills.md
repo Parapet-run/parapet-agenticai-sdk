@@ -107,7 +107,7 @@ graph TD
     F --> I
     H --> I
     I -->|missing| J[parapet-install-prereqs]
-    D --> K[parapet_login / parapet_whoami]
+    D --> K["parapet_login_start / parapet_login_wait / parapet_whoami"]
     F --> K
     H --> K
     K --> L[parapet_provision_agent]

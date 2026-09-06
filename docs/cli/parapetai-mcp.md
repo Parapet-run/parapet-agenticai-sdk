@@ -59,12 +59,13 @@ for the individual tools they call along the way.
 | Variable | Default | Controls |
 |---|---|---|
 | `PARAPETAI_CONTROL_PLANE_URL` | `https://app.parapet.run` | The control plane every `parapet_*` tool talks to, unless a per-call argument overrides it |
-| `PARAPETAI_MCP_CONFIG_DIR` | `~/.parapet` | Where the CLI token (`credentials.json`, one entry per control-plane URL) is stored after `parapet_login` |
+| `PARAPETAI_MCP_CONFIG_DIR` | `~/.parapet` | Where the CLI token (`credentials.json`, one entry per control-plane URL) is stored after `parapet_login_start`/`parapet_login_wait` |
 
 Never paste a token, agent secret, or any other credential into chat — the
-login flow is designed specifically to avoid that: `parapet_login` opens a
-browser approval page and polls until you approve, and never returns the
-credential itself to the calling model.
+login flow is designed specifically to avoid that: `parapet_login_start`
+opens a browser approval page (and hands back a manual fallback URL/code
+either way), `parapet_login_wait` polls until you approve, and neither
+ever returns the credential itself to the calling model.
 
 ## Source
 

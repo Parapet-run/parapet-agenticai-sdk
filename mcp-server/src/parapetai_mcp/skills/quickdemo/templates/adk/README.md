@@ -66,7 +66,7 @@ Otherwise, by hand:
    `python3 -m pip install --user pipx && pipx ensurepath` elsewhere.)
 3. In Claude Code (or any MCP client with this server connected), provision
    an agent and push the org policy:
-   - `parapet_login`
+   - `parapet_login_start`/`parapet_login_wait`
    - `parapet_provision_agent` (display_name: "quickdemo-adk-governed")
    - `parapet_push_policy_file` with `filename="40-org.cedar"` and the
      contents of `policy/40-org.cedar` in this directory

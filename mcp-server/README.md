@@ -28,7 +28,8 @@ Then in Claude Code: "add Parapet to this project."
 
 | Tool | What it does |
 |---|---|
-| `parapet_login` | Device-code login — open the printed URL, approve in your browser |
+| `parapet_login_start` | Start device-code login — returns a URL/code to approve, plus a manual fallback |
+| `parapet_login_wait` | Poll until that login is approved, and store the credential |
 | `parapet_whoami` | Who you're authenticated as, and which agents already exist |
 | `parapet_provision_agent` | Provision a new governed agent (`agent_id` + one-time `secret`) |
 | `parapet_get_quickstart` | The install command / env var names this deployment expects |

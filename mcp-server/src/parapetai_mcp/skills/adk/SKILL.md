@@ -27,13 +27,19 @@ don't pass a different `control_plane_url` from memory or guesswork.
 
 If `parapet_whoami` returns an `error` (not logged in):
 
-1. Call `parapet_login`. It prints a URL and a short code.
-2. Tell the user to open that URL and approve the login in their browser —
-   they need to already be signed in to the control plane's dashboard, or
-   the page will ask them to.
-3. `parapet_login` polls internally and returns once approved (or times
-   out after ~10 minutes — if it times out, just call it again).
-4. Re-run `parapet_whoami` to confirm.
+1. Call `parapet_login_start`. It returns immediately with a
+   `verification_uri_complete` (one click, code pre-filled — it also tries
+   opening this in the user's browser itself), a bare `verification_uri`,
+   and a `user_code`. **Show the user both** — the browser call succeeding
+   doesn't mean they saw a tab open, and they may want to approve from a
+   different device (e.g. type the short code on their phone instead of a
+   long URL). They need to already be signed in to the control plane's
+   dashboard, or the page will ask them to.
+2. Call `parapet_login_wait` with the `device_code` and `expires_in` from
+   step 1 (as `timeout_seconds`). It polls until approved and returns (or
+   times out after ~10 minutes — if it times out, call `parapet_login_start`
+   again).
+3. Re-run `parapet_whoami` to confirm.
 
 Never ask the user to paste a token, an agent secret, or any other
 credential into the chat. This flow never requires that.

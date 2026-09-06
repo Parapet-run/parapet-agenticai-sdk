@@ -1,6 +1,6 @@
 # MCP tools
 
-`parapetai-mcp serve` exposes 8 tools and 1 prompt over MCP. These are
+`parapetai-mcp serve` exposes 9 tools and 1 prompt over MCP. These are
 what the [skills](skills.md) call on your behalf — you can also invoke
 them directly from any MCP client. Every tool that hits the control plane
 takes an optional `control_plane_url` argument, defaulting to
@@ -12,17 +12,39 @@ Every tool that can fail returns `{"error": ...}` rather than raising —
 consistent across all of them, so a caller only needs one error-handling
 shape.
 
-## `parapet_login`
+## `parapet_login_start`
 
 ```python
-parapet_login(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL) -> str
+parapet_login_start(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL) -> dict
 ```
 
-Authenticate as yourself against a Parapet control plane. Opens the
-approval page in your default browser (falls back to printing the URL if
-that fails — e.g. no GUI available); sign in if needed, and approve. This
-tool polls until you do, and stores the resulting credential locally — **it
-never returns the credential itself.**
+Starts a device-code login and returns immediately — it does not wait for
+approval. The response always carries both a one-click and a manual path,
+since there's no reliable signal here that a browser call actually put a
+visible tab in front of the user:
+
+- `verification_uri_complete` — the code is pre-filled; this tool also
+  tries opening it in the default browser itself (`browser_opened` says
+  whether that call succeeded, not whether the user noticed the tab).
+- `verification_uri` (bare) + `user_code` — open the page and type the
+  code in by hand. Use this if the browser didn't visibly open, or to
+  approve from a different device (e.g. a phone).
+- `device_code`, `expires_in` — pass both to `parapet_login_wait` next.
+
+## `parapet_login_wait`
+
+```python
+parapet_login_wait(
+    device_code: str,
+    control_plane_url: str = DEFAULT_CONTROL_PLANE_URL,
+    timeout_seconds: int = 600,
+) -> str
+```
+
+Polls until the login started by `parapet_login_start` is approved,
+denied, or expires — pass through the `expires_in` value you got from
+`parapet_login_start` as `timeout_seconds`. Stores the resulting
+credential locally — **it never returns the credential itself.**
 
 Returns a human-readable status string, e.g.
 `"Logged in to https://app.parapet.run (account acct_...)."`.
@@ -34,7 +56,7 @@ parapet_whoami(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL) -> dict
 ```
 
 Who you're authenticated as, and which agents already exist in your
-account. Run `parapet_login` first if this reports not logged in. The
+account. Run `parapet_login_start`/`parapet_login_wait` first if this reports not logged in. The
 returned `account_id` is needed for every agent console link
 (`/a/{account_id}/agents/{agent_id}`), so treat it as required output, not
 optional.

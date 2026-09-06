@@ -40,7 +40,7 @@ them.
 | Variable | Default | Controls |
 |---|---|---|
 | `PARAPETAI_CONTROL_PLANE_URL` | `https://app.parapet.run` | Default control-plane URL every `parapet_*` tool uses unless a per-call argument overrides it. |
-| `PARAPETAI_MCP_CONFIG_DIR` | `~/.parapet` | Directory where `credentials.json` (the CLI token, one entry per control-plane URL) is stored after `parapet_login`. |
+| `PARAPETAI_MCP_CONFIG_DIR` | `~/.parapet` | Directory where `credentials.json` (the CLI token, one entry per control-plane URL) is stored after `parapet_login_start`/`parapet_login_wait`. |
 
 ## Gateway (`parapetai-gateway`)
 

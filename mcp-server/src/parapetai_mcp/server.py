@@ -1,12 +1,26 @@
 """The MCP tool surface. Every tool is a thin wrapper over client.py ->
 the control plane's CLI API -- no provisioning/auth logic lives here.
 
-parapet_login is the one tool that ever sees a raw cli_token: it comes
-back from ControlPlaneClient.poll_device_code() as a Python value inside
-this process and is written straight to disk via config.set_cli_token()
-in the same function call. It is deliberately never included in this
-tool's *return value* -- only a human-readable status string is -- so it
-never round-trips back through the calling model's context.
+parapet_login_wait is the one tool that ever sees a raw cli_token: it
+comes back from ControlPlaneClient.poll_device_code() as a Python value
+inside this process and is written straight to disk via
+config.set_cli_token() in the same function call. It is deliberately
+never included in this tool's *return value* -- only a human-readable
+status string is -- so it never round-trips back through the calling
+model's context.
+
+Login is split into parapet_login_start + parapet_login_wait rather than
+one blocking call. A single call that only returns once the human has
+approved (up to DEVICE_CODE_TTL_SECONDS later) means the verification URL
+and code -- computed immediately -- sit unreachable in a local variable
+for that entire wait: an MCP tool result only exists at completion, so a
+host that treats a multi-minute call as a background task (showing a
+status heartbeat, not intermediate text) leaves the calling model with
+no way to relay the URL/code to the user until the call finally resolves.
+parapet_login_start returns immediately with everything needed to
+proceed by hand; parapet_login_wait does the actual blocking poll
+afterward, once the human already has what they need regardless of how
+the host surfaces a long-running call.
 """
 
 from __future__ import annotations
@@ -29,44 +43,84 @@ from parapetai_mcp.config import DEFAULT_CONTROL_PLANE_URL, set_cli_token
 mcp = FastMCP("parapetai")
 
 _POLL_INTERVAL_SECONDS = 2
+# Fallback only -- parapet_login_wait is always called with the expires_in
+# parapet_login_start actually returned; this just covers a caller that
+# omits timeout_seconds. Kept in sync with the control plane's own
+# DEVICE_CODE_TTL_SECONDS (control-plane/src/parapetai_control/cli_auth.py)
+# by convention, not by import -- there's no shared package between the two
+# for a single constant this small.
+_DEFAULT_LOGIN_WAIT_TIMEOUT_SECONDS = 600
 
 
 @mcp.tool()
-async def parapet_login(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL) -> str:
-    """Authenticate as yourself against a Parapet control plane. Opens the
-    approval page in your default browser (falls back to just printing the
-    URL if that fails -- e.g. no GUI available) -- sign in if needed, and
-    approve. This tool then polls until you do, and stores the resulting
-    credential locally; it never returns the credential itself."""
+async def parapet_login_start(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL) -> dict[str, Any]:
+    """Start authenticating as yourself against a Parapet control plane.
+    Returns immediately -- always show the user BOTH paths below, since
+    there is no reliable way to know from here whether a browser actually
+    opened somewhere they'll notice:
+
+    - verification_uri_complete: one click, the code is pre-filled. This
+      tool also tries to open it in the default browser itself
+      (browser_opened says whether that call succeeded, not whether the
+      user actually saw the tab -- e.g. it can open behind other windows).
+    - Manual fallback: open verification_uri (no code in it) and type in
+      user_code by hand. Use this whenever the browser didn't visibly
+      open, or the developer wants to approve from a different device
+      (e.g. typing a short code on their phone is easier than a long URL).
+
+    Follow up with parapet_login_wait using the returned device_code to
+    finish the flow once the user has approved."""
     client = ControlPlaneClient(control_plane_url)
     started = await client.start_device_code()
     verification_uri = started["verification_uri"]
+    verification_uri_complete = started["verification_uri_complete"]
     user_code = started["user_code"]
-    device_code = started["device_code"]
-    expires_in = started["expires_in"]
 
     # webbrowser.open() can raise (or just return False) on a headless box,
     # inside a sandboxed subprocess with no display, etc. -- never let that
-    # take down the login flow itself; the URL is always printed either way.
+    # take down the login flow itself; both URLs are always returned either
+    # way, so the manual fallback is available regardless of this outcome.
     try:
-        opened = webbrowser.open(verification_uri)
+        opened = webbrowser.open(verification_uri_complete)
     except Exception:  # noqa: BLE001 -- best-effort, see above
         opened = False
 
     if opened:
-        prompt = (
-            f"Opened {verification_uri} in your browser (code: {user_code}) -- "
-            f"approve the login there. Waiting up to {expires_in}s..."
+        instructions = (
+            f"Opened {verification_uri_complete} in your browser -- approve the login there. "
+            f"If you don't see it, open {verification_uri} yourself and enter code {user_code}."
         )
     else:
-        prompt = (
-            f"Couldn't open a browser automatically -- open {verification_uri} "
-            f"(code: {user_code}) yourself and approve the login. "
-            f"Waiting up to {expires_in}s..."
+        instructions = (
+            f"Couldn't open a browser automatically. Open {verification_uri} and enter code "
+            f"{user_code} -- or open {verification_uri_complete} directly, code pre-filled."
         )
 
+    return {
+        "device_code": started["device_code"],
+        "user_code": user_code,
+        "verification_uri": verification_uri,
+        "verification_uri_complete": verification_uri_complete,
+        "expires_in": started["expires_in"],
+        "browser_opened": opened,
+        "instructions": f"{instructions} Then call parapet_login_wait with this device_code.",
+    }
+
+
+@mcp.tool()
+async def parapet_login_wait(
+    device_code: str,
+    control_plane_url: str = DEFAULT_CONTROL_PLANE_URL,
+    timeout_seconds: int = _DEFAULT_LOGIN_WAIT_TIMEOUT_SECONDS,
+) -> str:
+    """Wait for the login started by parapet_login_start to be approved,
+    polling until then (or until denied/expired/timeout). Pass through the
+    expires_in value parapet_login_start returned as timeout_seconds.
+    Stores the resulting credential locally; never returns the credential
+    itself -- see this module's docstring."""
+    client = ControlPlaneClient(control_plane_url)
     elapsed = 0
-    while elapsed < expires_in:
+    while elapsed < timeout_seconds:
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         elapsed += _POLL_INTERVAL_SECONDS
         result = await client.poll_device_code(device_code)
@@ -75,9 +129,9 @@ async def parapet_login(control_plane_url: str = DEFAULT_CONTROL_PLANE_URL) -> s
             set_cli_token(control_plane_url, result["cli_token"], account_id=result["account_id"])
             return f"Logged in to {control_plane_url} (account {result['account_id']})."
         if status in ("denied", "gone", "expired"):
-            return f"{prompt}\nLogin {status} -- run parapet_login again to retry."
+            return f"Login {status} -- call parapet_login_start again to retry."
 
-    return f"{prompt}\nTimed out waiting for approval -- run parapet_login again to retry."
+    return "Timed out waiting for approval -- call parapet_login_start again to retry."
 
 
 @mcp.tool()
@@ -181,13 +235,29 @@ def _python_check() -> dict[str, Any]:
     # parapetai-mcp normally runs inside a pipx-managed venv, which says
     # nothing about what a NEW venv (e.g. a generated quickdemo project)
     # would resolve `python3`/`python3.12` to system-wide.
-    for candidate in ("python3.13", "python3.12", "python3"):
-        path = shutil.which(candidate)
+    #
+    # Windows never gets a `python3` binary from a normal install -- not
+    # from python.org's installer, not from `winget install
+    # Python.Python.3.12` (the exact command this function recommends
+    # below). What IS reliably on PATH there is the `py` launcher, plus a
+    # `python3` App Execution Alias stub Windows ships by default at
+    # WindowsApps\python3.exe that raises PermissionError (or silently
+    # opens the Store) when no Store Python is installed. Checking
+    # `python3` first on Windows means a correct install following this
+    # tool's own instructions still reports "not found" -- `py -3.X` is
+    # the actual reliable probe there.
+    candidates: list[list[str]] = (
+        [["py", "-3.13"], ["py", "-3.12"], ["py", "-3"]]
+        if platform.system() == "Windows"
+        else [["python3.13"], ["python3.12"], ["python3"]]
+    )
+    for candidate in candidates:
+        path = shutil.which(candidate[0])
         if not path:
             continue
         try:
             out = subprocess.run(  # noqa: S603 -- fixed candidate list, not untrusted input
-                [path, "--version"], capture_output=True, text=True, timeout=5
+                [*candidate, "--version"], capture_output=True, text=True, timeout=5
             ).stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -196,7 +266,7 @@ def _python_check() -> dict[str, Any]:
             continue
         major, minor = int(match.group(1)), int(match.group(2))
         ok = (major, minor) >= (3, 12)
-        return {"ok": ok, "detail": f"{out} ({candidate} at {path})"}
+        return {"ok": ok, "detail": f"{out} ({' '.join(candidate)} at {path})"}
     return {"ok": False, "detail": "no python3.12+ found on PATH"}
 
 
@@ -298,8 +368,9 @@ def parapet_getting_started() -> str:
         "saved as a Markdown report, with a follow-up fix pass that wraps "
         "flagged sites in GovernedAgent/GovernedRunner. (Use the "
         "parapet-audit skill, then parapet-audit-fix, for this.)\n"
-        "4. Something else -- available tools: parapet_login (device-code "
-        "auth), parapet_whoami (who you are + your existing agents), "
+        "4. Something else -- available tools: parapet_login_start / "
+        "parapet_login_wait (device-code auth), parapet_whoami (who you "
+        "are + your existing agents), "
         "parapet_provision_agent (create a new governed agent), "
         "parapet_get_quickstart (this deployment's install command / env "
         "vars / default model), parapet_list_agents, "
