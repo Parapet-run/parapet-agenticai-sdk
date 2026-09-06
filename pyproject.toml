@@ -1,6 +1,6 @@
 [project]
 name = "parapetai-agent"
-version = "0.6.0"
+version = "0.6.1"
 requires-python = ">=3.12"
 description = "Open-source in-process governance for AI agent frameworks: Cedar-governed model/tool calls via build_middleware()/GovernedAgent, plus the Cedar engine, request/decision shapes, PEP<->control-plane protocol client, and Ed25519 PEP identity they run on."
 readme = "README.md"
@@ -31,8 +31,11 @@ dependencies = [
     "cedarpy>=4.0.0,<5.0",
     "structlog>=24.4,<26.0",
     "httpx>=0.28,<1.0",
-    # pep_identity.py / signing.py consumers -- Ed25519 keypair generation/signing.
-    "cryptography>=43.0,<47.0",
+    # pep_identity.py / signing.py consumers -- Ed25519 keypair generation/signing
+    # only (no x509 chain building), so the >=49.0 floor here is purely to clear
+    # CVE-2026-69249 (GHSA-jwv3-5hgf-82ww, x509 path-building DoS) -- unrelated
+    # to the Ed25519 primitives this package actually calls.
+    "cryptography>=49.0,<51.0",
     # policy/hooks.py GovernanceHook -- opentelemetry-api only (a verified no-op
     # when no tracer is configured), so this is safe to depend on unconditionally.
     "opentelemetry-api>=1.20,<2.0",
