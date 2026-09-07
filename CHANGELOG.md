@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0]
+
+### Added
+- **`vendor_scoped_resources` exposed directly on `GovernedAgent` and
+  `GovernedRunner`.** Both wrapper classes always forwarded every other
+  `build_middleware()`/`build_plugin()` kwarg except this one -- a real
+  gap: there was no way to turn on vendor-scoped Cedar resources for a
+  `GovernedAgent`/`GovernedRunner` with no control plane configured, only
+  for a caller using `build_middleware()`/`build_plugin()` directly. Now a
+  plain constructor kwarg on both, passed straight through.
+- **Cumulative cost/token tracking for LangGraph and `Governor`**
+  (previously MAF/ADK only). `ParapetAgentMiddleware` gained
+  `before_agent`/`abefore_agent`/`after_agent`/`aafter_agent` to bracket
+  the TRACE scope (no OTel `SpanContext` exists on this adapter yet, so
+  ids are generated and threaded through contextvars instead of derived
+  from one); `wrap_model_call`/`awrap_model_call` populate it the same way
+  `maf.py`'s own COST-TRACK logic does. `Governor` gained a new `trace()`
+  context manager (the explicit trace boundary it needs, having no
+  framework loop of its own to hook a "run started" callback into) and
+  `check_output(..., prompt_tokens=, completion_tokens=)` -- `Governor`
+  never sees the model's own response object, so usage has to be reported
+  rather than learned automatically the way MAF/ADK/LangGraph do it.
+  `policy/cost_tracker.py` gained `new_trace_id()`/`new_span_id()`, the
+  shared id-generation helpers both new call sites use. See
+  `docs/reference/cost-tracking.md`.
+- **Vendor/CRUD metadata and `vendor_scoped_resources` wired into
+  `Governor`.** `authorize_tool()` gained `func=`/`metadata=` (the same
+  two declaration paths -- decorator vs. framework-native metadata dict --
+  ADK/LangGraph already check, in the same order); `Governor.tool()`
+  passes `func=f` automatically so the decorator path needs no extra
+  wiring at the call site. `from_policy_dir()` gained
+  `vendor_scoped_resources` (`from_control_plane()` instead always
+  resolves it from the bundle, same priority rule the other three
+  integrations use -- there's no meaningful override there). Reaches the
+  exact same `context.vendor_system`/`crud_action` fields and Cedar
+  `resource` construction MAF/ADK/LangGraph produce, so a control-plane
+  connector-catalog match needs no special case for "this call came
+  through `Governor`." See `docs/reference/vendor-calls.md`.
+
+### Testing
+- **`tests/test_governance_surface_parity.py`** -- a mechanical,
+  cross-integration check that catches the exact bug class the
+  `vendor_scoped_resources` gap above was: derives the full set of opt-in
+  `GovernanceHook` constructor flags directly from its own signature and
+  asserts every integration surface (`Governor`, MAF, ADK, LangGraph)
+  accepts each one, or is explicitly exempted with a documented reason.
+  A second test in the same file asserts every such flag is mentioned
+  somewhere under `docs/` at all -- the gap that shipped `vendor_calls.py`/
+  `corroboration.py`/`cost_tracker.py` with zero documentation for months.
+  See CLAUDE.md's "Working agreements" for the policy this backs.
+
 ## [0.8.0]
 
 ### Added
