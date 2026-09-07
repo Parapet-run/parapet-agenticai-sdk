@@ -1815,6 +1815,26 @@ class TestGovernedAgent:
             await agent.run("Look up order 12345.")
         assert called["ran"] is True
 
+    def test_vendor_scoped_resources_is_forwarded_to_build_middleware(self) -> None:
+        """A real, previously-shipped gap: build_middleware() always had
+        this kwarg, GovernedAgent silently didn't forward it -- so there
+        was no way to turn it on for a GovernedAgent with no control plane
+        configured. No live call needed: build_middleware()'s own
+        resolution (`resolved_vendor_scoped_resources = vendor_scoped_resources`
+        when no control plane is configured) is synchronous."""
+        agent = GovernedAgent(
+            client=OpenAIChatCompletionClient(),
+            name="A",
+            instructions="noop",
+            agent_id="governed-agent-vendor-scoped-resources-test",
+            policy_dir=POLICIES,
+            entities_path=POLICIES / "entities.json",
+            vendor_scoped_resources=True,
+        )
+        chat_mw, func_mw = agent.middleware[0], agent.middleware[1]
+        assert chat_mw.hook._vendor_scoped_resources is True
+        assert func_mw.hook._vendor_scoped_resources is True
+
     async def test_explicit_middleware_kwarg_still_runs_alongside_governance(
         self, fake_upstream: None
     ) -> None:

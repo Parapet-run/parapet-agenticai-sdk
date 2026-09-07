@@ -1063,6 +1063,12 @@ class GovernedRunner(Runner):
     nothing more, and it enforces real (if generic) Cedar policy from the
     moment it's constructed, using the policy set bundled in
     parapetai-agent.
+
+    vendor_scoped_resources (default False) -- passed straight through to
+    build_plugin(); see its own docstring / maf.build_middleware()'s. Was
+    NOT exposed here until this parameter was added -- same gap as
+    GovernedAgent's own (build_plugin() always had it, this wrapper class
+    silently didn't forward it) -- see docs/reference/vendor-calls.md.
     """
 
     def __init__(
@@ -1082,6 +1088,7 @@ class GovernedRunner(Runner):
         console: bool = True,
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
         trust_session_user_id: bool = False,
+        vendor_scoped_resources: bool = False,
         **kwargs: Any,
     ) -> None:
         plugin = build_plugin(
@@ -1099,6 +1106,7 @@ class GovernedRunner(Runner):
             console=console,
             alter_transforms=alter_transforms,
             trust_session_user_id=trust_session_user_id,
+            vendor_scoped_resources=vendor_scoped_resources,
         )
         app = kwargs.get("app")
         if app is not None:

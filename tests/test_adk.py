@@ -898,6 +898,27 @@ class TestGovernedRunner:
         assert isinstance(parapet_plugin, ParapetPlugin)
         assert runner.plugin_manager.get_plugin("logging_plugin") is extra
 
+    def test_vendor_scoped_resources_is_forwarded_to_build_plugin(self, tmp_path: Path) -> None:
+        """A real, previously-shipped gap: build_plugin() always had this
+        kwarg, GovernedRunner silently didn't forward it -- so there was no
+        way to turn it on for a GovernedRunner with no control plane
+        configured."""
+        policy_dir = _custom_policy_dir(tmp_path)
+        agent = AdkAgent(name="test_agent", model="gemini-2.5-flash", instruction="be helpful")
+
+        runner = GovernedRunner(
+            app_name="test_app",
+            agent=agent,
+            session_service=InMemorySessionService(),
+            policy_dir=policy_dir,
+            agent_id="governed-runner-vendor-scoped-resources-test",
+            vendor_scoped_resources=True,
+        )
+
+        parapet_plugin = runner.plugin_manager.get_plugin("parapetai")
+        assert isinstance(parapet_plugin, ParapetPlugin)
+        assert parapet_plugin.hook._vendor_scoped_resources is True
+
 
 class TestInMemoryGovernedRunner:
     """InMemoryGovernedRunner -- the InMemoryRunner-shaped convenience real

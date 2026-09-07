@@ -1598,6 +1598,13 @@ class GovernedAgent(Agent):
     telemetry actually shipped to a control plane (once OTel is
     configured) are UNAFFECTED either way -- this only controls what
     prints locally.
+
+    vendor_scoped_resources (default False) -- passed straight through to
+    build_middleware(); see its own docstring. Was NOT exposed here until
+    this parameter was added (a real gap: build_middleware() itself always
+    had it, this wrapper class silently didn't forward it, so there was no
+    way to turn it on for a GovernedAgent with no control plane
+    configured -- see docs/reference/vendor-calls.md).
     """
 
     def __init__(
@@ -1616,6 +1623,7 @@ class GovernedAgent(Agent):
         otel_log_mode: Literal["streaming", "buffered"] = "buffered",
         console: bool = True,
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
+        vendor_scoped_resources: bool = False,
         **kwargs: Any,
     ) -> None:
         chat_mw, func_mw = build_middleware(
@@ -1632,6 +1640,7 @@ class GovernedAgent(Agent):
             otel_log_mode=otel_log_mode,
             console=console,
             alter_transforms=alter_transforms,
+            vendor_scoped_resources=vendor_scoped_resources,
         )
         extra_middleware = kwargs.get("middleware") or []
         kwargs["middleware"] = [chat_mw, func_mw, *extra_middleware]
