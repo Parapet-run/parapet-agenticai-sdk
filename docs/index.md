@@ -112,6 +112,9 @@ These hold across every integration surface, not just some of them:
 | Wire up Google ADK | [ADK guide](frameworks/adk.md) |
 | Use the MCP server / Claude Code skills to scaffold a project | [parapetai-mcp](cli/parapetai-mcp.md) |
 | Look up every constructor argument for `GovernedAgent`, `GovernedRunner`, `Decision`, etc. | [API Reference](reference/governor.md) |
+| Gate a policy on the real vendor/CRUD operation a tool performs, not just its name | [Vendor/CRUD metadata](reference/vendor-calls.md) |
+| Check a tool's declared behavior against its real network traffic | [Corroboration](reference/corroboration.md) |
+| Cap a trace/turn's spend or token usage in Cedar | [Cost & token tracking](reference/cost-tracking.md) |
 | See every environment variable this repo reads | [Environment variables](reference/env-vars.md) |
 | Understand the two-plane split (this SDK vs. the control plane) | [Architecture](ARCHITECTURE.md) |
 

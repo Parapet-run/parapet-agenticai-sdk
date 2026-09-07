@@ -53,6 +53,17 @@ callable with an agent secret, and are deliberately not documented here: an
 adopter never needs them, and this SDK never calls them. `agent_id` and
 `agent_secret` are issued to you once at provisioning, out of band.
 
+#### `vendor_scoped_resources` on the bundle response
+
+Since 0.7.0, the `GET /api/v1/bundle` response may carry a top-level
+`vendor_scoped_resources: bool` field — lets a control-plane operator turn
+on [opt-in vendor-scoped Cedar resource construction](reference/vendor-calls.md)
+for a tenant without a code change on the PEP side. Resolved **once, at
+bootstrap** by `Governor.from_control_plane()` / `bootstrap_engine()` —
+unlike `.cedar` policy/entities content, it does not hot-reload mid-process
+on a later poll; a tenant-level change takes effect on this PEP's next
+full bootstrap (process restart).
+
 ### OTLP receiver — standard paths
 
 | Method & path | Auth | Purpose |

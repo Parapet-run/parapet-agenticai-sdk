@@ -18,6 +18,7 @@ backend.
 | `PARAPETAI_OTEL_LOG_CONTENT` | `"false"` | Opt-in gate for whether OTel spans carry full prompt/response/tool-arg text. The decision audit record itself is **always** content-free regardless of this flag — see [Observability](../OBSERVABILITY.md). |
 | `PARAPETAI_PEP_ID` | `f"pep-{hostname}-{pid}"` | Stable identity of this PEP process on the control plane's fleet dashboard. |
 | `PARAPETAI_PEP_KEY_PATH` | `~/.parapetai/pep_ed25519.key` | Path to the persisted Ed25519 PEP identity private key, generated on first use. Only touched once a control plane is configured. |
+| `PARAPETAI_MODEL_PRICING` | none | JSON object overriding/extending the built-in `$/1M token` price table used for [cumulative cost tracking](cost-tracking.md) (e.g. `{"my-custom-model": {"input": 1.0, "output": 3.0}}`). Malformed JSON is ignored wholesale — falls back to defaults rather than half-applying. Same variable name and shape as the control plane's own retrospective cost-panel rollup, so one override covers both. |
 | `PARAPET_HHEM_MODEL` | `"vectara/hallucination_evaluation_model"` | HuggingFace model id for the in-process HHEM hallucination-evaluation predictor. See [Groundedness (HHEM)](../GROUNDEDNESS_HHEM.md). |
 | `PARAPET_HHEM_URL` | none | If set, call a remote HHEM eval service instead of loading the model in-process. |
 | `PARAPET_SLM_JUDGE_MODEL` | none | Dedicated SLM-judge model name — takes priority over reusing the agent's own model. |

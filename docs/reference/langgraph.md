@@ -39,6 +39,7 @@ def build_middleware(
     persist_pep_key: bool = True,
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
     console: bool = True,
+    vendor_scoped_resources: bool = False,
 ) -> ParapetAgentMiddleware:
 ```
 
@@ -46,7 +47,8 @@ Same kwarg surface, same semantics for every parameter, as
 [`build_middleware()`](governed-agent.md#build_middleware)
 (MAF)/[`build_plugin()`](governed-runner.md#build_plugin) (ADK) — policy
 resolution, control-plane pull, Ed25519 PEP identity, OTel auto-wiring,
-idempotent per-identity caching. None of it is LangGraph-specific
+idempotent per-identity caching, and `vendor_scoped_resources` (see
+[Vendor/CRUD metadata](vendor-calls.md)). None of it is LangGraph-specific
 (`governance_runtime.py`/`control_plane.py`/`pep_identity.py` are already
 framework-agnostic); see those pages for the full explanation of each
 parameter.
@@ -69,7 +71,9 @@ joins every poller thread; test-only, mirrors
 
 ```python
 class ParapetAgentMiddleware(AgentMiddleware):
-    def __init__(self, engine: PolicyEngine, caller: Caller) -> None: ...
+    def __init__(
+        self, engine: PolicyEngine, caller: Caller, *, vendor_scoped_resources: bool = False
+    ) -> None: ...
 ```
 
 Constructed directly only if you're building your own `PolicyEngine`/
@@ -80,10 +84,11 @@ is `build_middleware()`. Implements:
 |---|---|---|
 | `wrap_model_call` / `awrap_model_call` | `model_call` (pre), then `post` | Before and after the underlying model call |
 | `wrap_tool_call` / `awrap_tool_call` | `tool_call` | Before the tool body executes |
+| `before_agent` / `abefore_agent`, `after_agent` / `aafter_agent` | none — no Cedar decision here | Once at the start/end of one whole `agent.invoke()`/`ainvoke()` run. No enforcement role; exist purely to bracket the [cumulative cost/token tracking](cost-tracking.md) trace scope, since no OTel `SpanContext` exists here yet to derive one from the way MAF/ADK do. |
 
-Each raises `GovernanceDenied` (never a silently-substituted response)
-before calling the framework's own `handler(request)` on deny — see
-[How a deny surfaces](../frameworks/langgraph.md#what-it-governs).
+Each of `wrap_model_call`/`wrap_tool_call` raises `GovernanceDenied`
+(never a silently-substituted response) before calling the framework's
+own `handler(request)` on deny — see [How a deny surfaces](../frameworks/langgraph.md#what-it-governs).
 
 ## Naming: not re-exported from `parapetai_agent` under the bare names
 
@@ -111,3 +116,4 @@ names — same object either way).
 - [`governed_identity`](governed-identity.md) — per-call end-user identity
 - [`Decision`](decision.md), [Exceptions](exceptions.md)
 - [Environment variables](env-vars.md)
+- [Vendor/CRUD metadata](vendor-calls.md), [Cumulative cost & token tracking](cost-tracking.md)

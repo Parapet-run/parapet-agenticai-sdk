@@ -102,6 +102,9 @@ nav:
       - GovernedRunner: reference/governed-runner.md
       - ParapetAgentMiddleware: reference/langgraph.md
       - governed_identity: reference/governed-identity.md
+      - Vendor/CRUD metadata: reference/vendor-calls.md
+      - Corroboration: reference/corroboration.md
+      - Cost & token tracking: reference/cost-tracking.md
       - Decision: reference/decision.md
       - Exceptions: reference/exceptions.md
       - Environment variables: reference/env-vars.md
@@ -115,4 +118,5 @@ nav:
       - "0006 — Cedar stage/action annotations": adr/0006-cedar-policy-stage-and-action-annotations.md
       - "0008 — REVIEW decision outcome": adr/0008-review-decision-outcome.md
       - "0009 — Approval loop": adr/0009-approval-loop.md
+      - "0010 — Cumulative cost tracking": adr/0010-cumulative-cost-tracking.md
   - Dependencies: dependencies.md

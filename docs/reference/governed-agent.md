@@ -60,6 +60,7 @@ def __init__(
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
     console: bool = True,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
+    vendor_scoped_resources: bool = False,
     **kwargs: Any,
 ) -> None:
 ```
@@ -118,6 +119,12 @@ wins, since OTel's provider registration is process-wide and set-once.
 |---|---|---|
 | `alter_transforms` | `None` | Named callables a post-call `ALTER` decision (a bundle permit carrying `@action("alter")` + `@alter_with("<name>")`) applies to a model response or tool result before it's let through. Merged **over** the built-in defaults (currently just `"redact_all"`, a placeholder). A bundle naming a transform not registered here fails closed to a deny — never a silent pass-through of the original, unaltered content. |
 
+### Vendor/CRUD resource scoping
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `vendor_scoped_resources` | `False` | Switches Cedar's `resource` for a `tool_call` from `Resource::"<provider>"` to `Resource::"<vendor_system>/<vendor_operation>"` (or `Resource::"undeclared"`) once a tool has declared vendor/CRUD metadata — see [Vendor/CRUD metadata](vendor-calls.md). When a control plane is configured, the bundle's own `vendor_scoped_resources` field takes priority over this argument. |
+
 ## Cloud vs. local policy resolution
 
 `persist_policy_dir` controls whether a fetched control-plane bundle is
@@ -170,6 +177,7 @@ def build_middleware(
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
     console: bool = True,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
+    vendor_scoped_resources: bool = False,
 ) -> tuple[ParapetChatMiddleware, ParapetFunctionMiddleware]:
 ```
 
@@ -197,5 +205,6 @@ differ.
 
 - [MAF guide](../frameworks/maf.md) — narrative usage, streaming behavior
 - [`governed_identity` (MAF variant)](governed-identity.md#parapetai_agentmafgoverned_identity) — per-call end-user identity
+- [Vendor/CRUD metadata](vendor-calls.md), [Cumulative cost & token tracking](cost-tracking.md)
 - [`Decision`](decision.md), [Exceptions](exceptions.md)
 - [Environment variables](env-vars.md)

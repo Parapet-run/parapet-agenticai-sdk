@@ -90,6 +90,27 @@ If blocking a streamed response before delivery matters for your use
 case, compare with [ADK's streaming behavior](adk.md#streaming), which
 buffers per-chunk and evaluates before the final chunk is delivered.
 
+## Vendor and CRUD metadata, corroboration, and cost tracking
+
+Three additional signals reach Cedar automatically once you use them,
+with no extra wiring on top of `GovernedAgent`/`build_middleware()`:
+
+- **[Vendor/CRUD metadata](../reference/vendor-calls.md)** — declare what
+  a tool actually does downstream (`@declare_vendor_call(...)`) so a
+  policy can gate on `context.crud_action == "delete"` instead of an
+  opaque tool name. `GovernedAgent(vendor_scoped_resources=True)` (also
+  accepted by `build_middleware()` directly) switches the Cedar `resource`
+  itself to `Resource::"<vendor>/<op>"`.
+- **[Corroboration](../reference/corroboration.md)** — opt-in, real OTel
+  auto-instrumentation (`parapetai-agent[corroboration]`) that observes a
+  tool's actual outbound HTTP/gRPC calls, correlated to its `tool_call`
+  span. Capture-only today; no comparison against declared `crud_action`
+  yet.
+- **[Cumulative cost & token tracking](../reference/cost-tracking.md)** —
+  `context.trace_cumulative_cost_usd_micros` /
+  `context.span_cumulative_tokens` (and their siblings) are populated
+  automatically on every model/tool decision, no flag required.
+
 ## Identity
 
 Two ways to assert who's calling:

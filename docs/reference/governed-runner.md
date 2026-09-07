@@ -41,6 +41,7 @@ def __init__(
     console: bool = True,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     trust_session_user_id: bool = False,
+    vendor_scoped_resources: bool = False,
     **kwargs: Any,
 ) -> None:
 ```
@@ -49,12 +50,15 @@ def __init__(
 `Runner.__init__` signature, which has no positional parameters to
 forward, so this class doesn't invent any either.
 
-`policy_dir` through `alter_transforms` are the exact same governance
-surface as [`GovernedAgent`](governed-agent.md#constructor) — identical
-meaning, identical defaults, identical control-plane/policy-resolution
-behavior. See that page for the full explanation of each. `**kwargs` are
-forwarded to `Runner.__init__` — `agent=`, `app_name=`,
-`session_service=`, or `app=`, unchanged from plain `Runner(...)`.
+`policy_dir` through `alter_transforms`, and `vendor_scoped_resources`,
+are the exact same governance surface as
+[`GovernedAgent`](governed-agent.md#constructor) — identical meaning,
+identical defaults, identical control-plane/policy-resolution behavior
+(see [Vendor/CRUD metadata](vendor-calls.md) for what
+`vendor_scoped_resources` does). See that page for the full explanation
+of each. `**kwargs` are forwarded to `Runner.__init__` — `agent=`,
+`app_name=`, `session_service=`, or `app=`, unchanged from plain
+`Runner(...)`.
 
 ## `trust_session_user_id` — the one ADK-specific parameter
 
@@ -144,6 +148,7 @@ def build_plugin(
     console: bool = True,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     trust_session_user_id: bool = False,
+    vendor_scoped_resources: bool = False,
 ) -> ParapetPlugin:
 ```
 
@@ -173,3 +178,4 @@ for the full explanation and streaming behavior.
 - [`governed_identity`](governed-identity.md) — per-call end-user identity
 - [`Decision`](decision.md), [Exceptions](exceptions.md)
 - [Environment variables](env-vars.md)
+- [Vendor/CRUD metadata](vendor-calls.md), [Cumulative cost & token tracking](cost-tracking.md)

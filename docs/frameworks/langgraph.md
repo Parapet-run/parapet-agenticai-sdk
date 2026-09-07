@@ -72,6 +72,28 @@ stages at the one place `create_agent`/`create_deep_agent` both already
 accept a `middleware=` list, without needing a second, complementary
 interception point — which is why it's the design this module uses instead.
 
+## Vendor/CRUD metadata, corroboration, and cost tracking
+
+- **[Vendor/CRUD metadata](../reference/vendor-calls.md)** is wired in —
+  `@declare_vendor_call(...)` on a tool's underlying callable, or a
+  LangChain tool's own `.metadata` dict (checked first). Passing
+  `vendor_scoped_resources=True` to `build_middleware()`, or to
+  `ParapetAgentMiddleware`'s constructor directly, switches the Cedar
+  `resource` to `Resource::"<vendor>/<op>"` the same way it does for
+  MAF/ADK.
+- **[Corroboration](../reference/corroboration.md)** is framework-agnostic
+  — `enable_http_corroboration()` works identically regardless of which
+  integration you use.
+- **[Cumulative cost & token tracking](../reference/cost-tracking.md)** —
+  `context.trace_cumulative_cost_usd_micros` / `context.span_cumulative_tokens`
+  (and their siblings) are populated automatically, no flag required.
+  Unlike MAF/ADK, this doesn't derive trace/span ids from an OTel
+  `SpanContext` (no per-call span exists here yet — see Known gaps below)
+  — `before_agent`/`after_agent` and `wrap_model_call` generate and
+  correlate their own instead. Functionally equivalent from a policy
+  author's perspective: the same four `context` fields, the same
+  trace/turn scoping.
+
 ## Known gaps
 
 Deliberately deferred rather than silently half-built — see

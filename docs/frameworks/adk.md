@@ -89,6 +89,22 @@ content before governance has seen the complete response, even though the
 no partial content ever reaches the caller before a post-stage decision,
 don't stream the response.
 
+## Vendor and CRUD metadata, corroboration, and cost tracking
+
+Same three additional signals as [MAF](maf.md#vendor-and-crud-metadata-corroboration-and-cost-tracking),
+wired in identically for ADK:
+
+- **[Vendor/CRUD metadata](../reference/vendor-calls.md)** —
+  `@declare_vendor_call(...)` or a `FunctionTool`'s own
+  `custom_metadata=` dict (checked first).
+  `GovernedRunner(vendor_scoped_resources=True)` (also accepted by
+  `build_plugin()` directly) switches the Cedar `resource` to
+  `Resource::"<vendor>/<op>"`.
+- **[Corroboration](../reference/corroboration.md)** — opt-in, framework-agnostic;
+  see the MAF section linked above.
+- **[Cumulative cost & token tracking](../reference/cost-tracking.md)** —
+  automatic on every model/tool decision, no flag required.
+
 ## Identity
 
 ```python

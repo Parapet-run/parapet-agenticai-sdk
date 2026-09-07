@@ -47,6 +47,7 @@ in.
 | `langgraph` | `langchain`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | LangGraph / LangChain integration ([`ParapetAgentMiddleware`](reference/langgraph.md)) and OTel export. The full `langchain` package, not just `langgraph`/`langchain-core` — `AgentMiddleware` lives in `langchain.agents.middleware`. |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction for HTTP-fronted agents. |
 | `judge` | `litellm` | Provider-agnostic SLM-judge backend (Anthropic, Bedrock, Vertex, Groq, Ollama). Not needed for the default `slm` backend. |
+| `corroboration` | `opentelemetry-instrumentation-{httpx,requests,urllib3,aiohttp-client,grpc}`, `opentelemetry-sdk` | Real OTel auto-instrumentation for a tool's own outbound network calls, correlated as a child of its `parapetai.tool_call` span. See [Corroboration](reference/corroboration.md). HTTP/gRPC transports only, not the database instrumentors `opentelemetry-python-contrib` also ships — those observe a tool's own datastore, a different question from whether its declared `crud_action` matches what it did downstream. |
 | `dev` | `pytest`, `pytest-asyncio`, `respx`, `ruff`, `mypy`, `opentelemetry-sdk` | Local development / CI only. |
 | `docs` | `mkdocs`, `mkdocs-material` | Building this documentation site. Local development / CI only. |
 

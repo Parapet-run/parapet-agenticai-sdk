@@ -30,6 +30,7 @@ def from_policy_dir(
     bundle_files: Mapping[str, str] | None = None,
     caller: Caller | None = None,
     on_decision: OnDecision | None = None,
+    vendor_scoped_resources: bool = False,
 ) -> Governor:
 ```
 
@@ -42,6 +43,7 @@ Load Cedar policy from local files. Fully local — no network call, ever.
 | `bundle_files` | `None`, keyword | The same `{filename: content}` shape a control-plane bundle carries. When supplied, loaded into fresh `ContentCheckConfig`/`GroundednessConfig`/`JudgeConfig` instances — this is what enables the input scanners (PII/secrets/injection) and post-model evals (groundedness, SLM judge). Without it, only Cedar authorization runs. |
 | `caller` | `None`, keyword | This process's own identity. Defaults to `Caller(agent_id="agent")`. |
 | `on_decision` | `None`, keyword | Callback fired for every decision — see [`Decision`](decision.md#getting-a-decision-out-of-a-call). |
+| `vendor_scoped_resources` | `False`, keyword | Same opt-in flag `build_middleware()`/`build_plugin()` accept — see [Vendor/CRUD metadata](vendor-calls.md). |
 
 ```python
 gov = Governor.from_policy_dir("./policies")
@@ -89,6 +91,14 @@ single call.
 | `mode` | `"enforce"` | Passed through to the bundle bootstrap. |
 | `caller` | `None` | Overrides the default `Caller(agent_id=resolved_agent_id, tenant=tenant)`. |
 | `on_decision` | `None` | Same as above. |
+
+**No `vendor_scoped_resources` parameter here** — unlike
+`from_policy_dir()`, this constructor always resolves it from the bundle
+response's own `vendor_scoped_resources` field instead (`Bootstrap.vendor_scoped_resources`),
+same priority rule `build_middleware()`/`build_plugin()` use: a tenant's
+console-driven rollout decision is authoritative once a control plane is
+configured at all, so there's nothing here for a caller to meaningfully
+override.
 
 **On an unreachable control plane**, it degrades to the last bundle on
 disk rather than refusing to start — an outage on Parapet's side must
@@ -152,6 +162,8 @@ def authorize_tool(
     *,
     roles: Sequence[str] | None = None,
     claims: Mapping[str, Any] | None = None,
+    func: Callable[..., Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
     raise_on_deny: bool = True,
 ) -> Decision:
 ```
@@ -165,12 +177,18 @@ never runs.
 | `name` | Tool name — becomes `context.tool_name` in the Cedar evaluation. |
 | `arguments` | Tool call arguments — becomes `context.tool_args`. |
 | `roles` / `claims` | Caller identity for this call. |
+| `func` | The tool's underlying callable, if it was decorated with `@declare_vendor_call` — see [Vendor/CRUD metadata](vendor-calls.md). `Governor.tool()` passes this for you automatically. |
+| `metadata` | A plain dict declaring vendor/CRUD facts for a tool you don't own the source of — same `parapet_vendor_system`/`parapet_resource_type`/`parapet_crud_action` convention ADK's `custom_metadata`/LangChain's `.metadata` use. Checked before `func`. |
 | `raise_on_deny` | Default `True`. |
 
 Tool arguments **are** previewable in the audit trail (unlike prompt/
 response content) — they're what the policy already matched on, and an
 approver who can't see which call is being approved can't meaningfully
 approve it.
+
+Also populates [cumulative cost/token tracking](cost-tracking.md)
+context (`context.span_cumulative_*`), correlated to whatever
+`check_input()` most recently set as the current turn.
 
 ### `check_output()`
 
@@ -183,6 +201,8 @@ def check_output(
     roles: Sequence[str] | None = None,
     claims: Mapping[str, Any] | None = None,
     model: str | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
     raise_on_deny: bool = True,
 ) -> Decision:
 ```
@@ -196,8 +216,36 @@ answer is delivered.** A scorer that errors fails closed (denies).
 | `response` | Model output text to check. |
 | `sources` | Source documents used to score groundedness. |
 | `roles` / `claims` | Caller identity. |
-| `model` | Model name; informational. |
+| `model` | Model name; informational, and used to estimate cost (below) via the same `$/1M token` table `policy/pricing.py` exposes to MAF/ADK. |
+| `prompt_tokens` / `completion_tokens` | Both default `0` (no usage to report). `Governor` never sees the model's own response object — only this already-extracted `text` — so it can't learn token counts on its own; your own loop, which does hold the real response, reports them here. See [Cumulative cost & token tracking](cost-tracking.md). |
 | `raise_on_deny` | Default `True`. |
+
+## `trace()`
+
+```python
+@contextlib.contextmanager
+def trace(self) -> Iterator[None]:
+```
+
+Marks one [cumulative cost/token-tracking](cost-tracking.md) trace
+boundary — every `check_input()`/`authorize_tool()`/`check_output()` call
+made inside the block shares one running total, dropped the moment the
+block exits:
+
+```python
+with gov.trace():
+    gov.check_input(prompt, model="gpt-4o-mini")
+    gov.authorize_tool("lookup_order", {"order_id": "A1"})
+    gov.check_output(answer, model="gpt-4o-mini", completion_tokens=42)
+```
+
+`Governor` has no framework loop of its own to hook a "run started"/"run
+ended" boundary into (MAF/ADK/LangGraph each have one) — so unlike those
+three, this has to be explicit. Without it, every call is its own
+one-off trace: cumulative fields are still always populated, they just
+never accumulate past that single call. Nestable — an inner `with
+gov.trace():` gets its own trace and the outer one resumes on exit — but
+nesting does not merge totals between the two.
 
 ## Review approvals
 
@@ -258,4 +306,6 @@ always call it without knowing which constructor was used.
 - [Governor guide](../frameworks/governor.md) — narrative walkthrough
 - [`Decision`](decision.md) — everything a check returns
 - [Exceptions](exceptions.md) — `GovernanceDenied`, `GovernanceReviewRequired`
+- [Vendor/CRUD metadata](vendor-calls.md) — `func=`/`metadata=`, `vendor_scoped_resources`
+- [Cumulative cost & token tracking](cost-tracking.md) — `trace()`, `prompt_tokens=`/`completion_tokens=`
 - [ADR 0009 — the approval loop](../adr/0009-approval-loop.md)

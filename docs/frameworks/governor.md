@@ -77,6 +77,35 @@ final one before delivery) and [`GovernedAgent`](maf.md#streaming) (can
 only audit-after-the-fact on a stream) each handle it differently, for
 comparison.
 
+## Vendor/CRUD metadata, corroboration, and cost tracking
+
+All three signals reach Cedar through `Governor` too — the same
+`context.vendor_system`/`crud_action`/`trace_cumulative_*` fields MAF/ADK/
+LangGraph populate, not a `Governor`-specific approximation of them, so a
+control-plane connector-catalog match or a hand-written Cedar policy
+needs no special case for "this call came through `Governor`."
+
+- **[Corroboration](../reference/corroboration.md)** works identically
+  here — `enable_http_corroboration()` is framework-agnostic.
+- **[Vendor/CRUD metadata](../reference/vendor-calls.md)** —
+  `authorize_tool(..., func=my_tool)` resolves `@declare_vendor_call` off
+  the underlying callable (`Governor.tool()` passes `func=` for you
+  automatically); `authorize_tool(..., metadata={...})` covers a tool you
+  don't own the source of — the natural path here, since a raw
+  `authorize_tool()` call has no framework tool object to read a native
+  metadata dict off of at all. `from_policy_dir(vendor_scoped_resources=True)`
+  switches the Cedar `resource` itself to `Resource::"<vendor>/<op>"`,
+  same as the other three integrations (`from_control_plane()` instead
+  resolves this from the bundle, same priority rule as `build_middleware()`).
+- **[Cumulative cost & token tracking](../reference/cost-tracking.md)** —
+  `check_input()`/`authorize_tool()` populate it automatically; since
+  `Governor` never sees the model's own response object (only text you
+  hand it), report real usage via `check_output(model=..., prompt_tokens=...,
+  completion_tokens=...)`. Wrap one whole run in `gov.trace()` so multiple
+  turns accumulate together — without it, every call is its own one-off
+  trace, same degrade the LangGraph adapter falls back to when its own
+  `before_agent` hook never fires.
+
 ## Review approvals
 
 ```python
