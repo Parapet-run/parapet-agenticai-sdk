@@ -360,6 +360,33 @@ Unbuilt or undocumented, not broken. Don't investigate these as bugs.
   `make docs` (`mkdocs build --strict` — fails the build on a broken
   internal link) before considering docs-affecting work done; `make
   docs-serve` for a live-reload preview while writing.
+  **This bullet was already written down once and still didn't hold**:
+  `vendor_calls.py`, `corroboration.py`, and `cost_tracker.py` all shipped
+  (0.6.0–0.8.0) with ZERO mention anywhere under `docs/` — a written
+  promise with no mechanical check behind it decayed silently for months.
+  `tests/test_governance_surface_parity.py::test_every_hook_flag_is_mentioned_somewhere_in_docs`
+  is the backstop now: a new opt-in `GovernanceHook` constructor flag with
+  no doc mention anywhere fails `make test-sdk`, not just code review.
+  It's a blunt, mechanical check ("mentioned at all," not "documented
+  well") — the prose-quality half of this bullet still needs a human.
+
+- **A new opt-in `GovernanceHook` constructor flag must be mirrored on
+  every integration surface that builds one** (`Governor`,
+  `build_middleware()`/`GovernedAgent`, `build_plugin()`/`GovernedRunner`,
+  `langgraph.build_middleware()`/`ParapetAgentMiddleware`) or explicitly
+  exempted with a documented reason. This is exactly the bug class that
+  shipped `GovernedAgent`/`GovernedRunner` silently missing
+  `vendor_scoped_resources` (0.7.0) while the lower-level
+  `build_middleware()`/`build_plugin()` functions they're built on already
+  had it — a caller reasonably assumed the wrapper class supported
+  whatever the module's own docs described, since nothing distinguished
+  "documented" from "actually reachable from this specific class."
+  `tests/test_governance_surface_parity.py::test_every_integration_surface_accepts_every_hook_flag`
+  derives the required flag set directly from `GovernanceHook.__init__`'s
+  own signature and fails for any surface missing one — no hand-maintained
+  list to fall out of sync. Adding a new integration surface (a fifth
+  framework adapter, say) means adding it to that test's
+  `_governance_surfaces()`, in the same change that adds the adapter.
 
 ## Where to look
 
