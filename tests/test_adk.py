@@ -45,6 +45,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.logging_plugin import LoggingPlugin
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools.function_tool import FunctionTool as AdkFunctionTool
 from google.genai import types
 
 from parapetai_agent.adk import (
@@ -62,6 +63,7 @@ from parapetai_agent.adk import (
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.identity import Caller
 from parapetai_agent.policy.engine import PolicyEngine
+from parapetai_agent.vendor_calls import VendorCallSpec, declare_vendor_call
 
 # parents[1], not [2]: this repo is <root>/tests/, whereas the platform copy
 # this was ported from sat at <root>/parapetai-agent/tests/ -- one level deeper.
@@ -552,6 +554,105 @@ class TestToolCallSyntheticContext:
             result={"value": "the secret is 42"},
         )
         assert post == "[REDACTED BY POLICY]"
+
+
+class TestToolVendorCrudMetadata:
+    """auth-integrations.md §2: a tool decorated with @declare_vendor_call
+    (resolved via tool.func) or carrying vendor keys in custom_metadata
+    reaches Cedar as context.vendor_system/vendor_operation/crud_action --
+    proven end to end through the real before_tool_callback(), not just at
+    the vendor_calls.resolve_vendor_call() unit level
+    (tests/test_vendor_calls.py)."""
+
+    async def test_declared_crud_action_via_decorator_drives_a_real_cedar_decision(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_deletes")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has crud_action && context.crud_action == "delete" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="vendor-crud-decorator-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        @declare_vendor_call(
+            VendorCallSpec(vendor_system="salesforce", resource_type="Case", crud_action="delete")
+        )
+        def delete_salesforce_case(case_id: str) -> str:
+            return f"deleted {case_id}"
+
+        tool = AdkFunctionTool(func=delete_salesforce_case)
+        ctx = _FakeToolContext(invocation_id="inv-vendor-1")
+
+        with track_tool_denials() as denials:
+            resp = await plugin.before_tool_callback(
+                tool=tool, tool_args={"case_id": "500x"}, tool_context=ctx
+            )
+
+        assert resp is not None
+        assert "GOVERNANCE_DENIED" in resp["error"]
+        assert denials
+
+    async def test_declared_crud_action_via_custom_metadata_drives_a_real_cedar_decision(
+        self, tmp_path: Path
+    ) -> None:
+        """ADK-idiomatic path: a tool this codebase doesn't own the source
+        of (e.g. a third-party MCP tool) declares vendor facts via
+        BaseTool.custom_metadata instead of the decorator."""
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_deletes")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has crud_action && context.crud_action == "delete" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="vendor-crud-metadata-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        def delete_incident(incident_id: str) -> str:
+            return f"deleted {incident_id}"
+
+        tool = AdkFunctionTool(func=delete_incident)
+        tool.custom_metadata = {
+            "parapet_vendor_system": "servicenow",
+            "parapet_resource_type": "Incident",
+            "parapet_crud_action": "delete",
+        }
+        ctx = _FakeToolContext(invocation_id="inv-vendor-2")
+
+        resp = await plugin.before_tool_callback(
+            tool=tool, tool_args={"incident_id": "INC-1"}, tool_context=ctx
+        )
+
+        assert resp is not None
+        assert "GOVERNANCE_DENIED" in resp["error"]
+
+    async def test_a_tool_with_no_declared_vendor_metadata_is_unaffected(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_deletes")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has crud_action && context.crud_action == "delete" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="vendor-crud-unaffected-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        def undeclared_tool(case_id: str) -> str:
+            return f"handled {case_id}"
+
+        tool = AdkFunctionTool(func=undeclared_tool)
+        ctx = _FakeToolContext(invocation_id="inv-vendor-3")
+
+        resp = await plugin.before_tool_callback(
+            tool=tool, tool_args={"case_id": "500x"}, tool_context=ctx
+        )
+
+        assert resp is None
 
 
 class TestIdentityResolution:

@@ -76,6 +76,7 @@ from parapetai_agent.maf import (
     track_tool_denials,
 )
 from parapetai_agent.policy.engine import PolicyEngine
+from parapetai_agent.vendor_calls import VendorCallSpec, declare_vendor_call
 
 # parents[1], not [2]: this repo is <root>/tests/, whereas the platform copy
 # this was ported from sat at <root>/parapetai-agent/tests/ -- one level deeper.
@@ -793,6 +794,76 @@ class TestToolPostCallGovernance:
 
         await func_mw.process(ctx, call_next)
         assert ctx.result == "custom replacement"
+
+
+class TestToolVendorCrudMetadata:
+    """auth-integrations.md §2: a tool decorated with @declare_vendor_call
+    reaches Cedar as context.vendor_system/vendor_operation/crud_action --
+    proven end to end through the real ParapetFunctionMiddleware.process(),
+    not just at the vendor_calls.resolve_vendor_call() unit level
+    (tests/test_vendor_calls.py)."""
+
+    async def test_declared_crud_action_drives_a_real_cedar_decision(self, tmp_path: Path) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_deletes")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has crud_action && context.crud_action == "delete" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="vendor-crud-test", tenant="default")
+        mw = ParapetFunctionMiddleware(engine, caller)
+
+        @declare_vendor_call(
+            VendorCallSpec(vendor_system="salesforce", resource_type="Case", crud_action="delete")
+        )
+        def delete_salesforce_case(case_id: str) -> str:
+            return f"deleted {case_id}"
+
+        fn = FunctionTool(name="delete_salesforce_case", func=delete_salesforce_case)
+        ctx = FunctionInvocationContext(function=fn, arguments={"case_id": "500x"})
+        called = {"ran": False}
+
+        async def call_next() -> None:
+            called["ran"] = True
+            ctx.result = delete_salesforce_case("500x")
+
+        await mw.process(ctx, call_next)
+
+        assert called["ran"] is False
+        assert "GOVERNANCE_DENIED" in str(ctx.result)
+
+    async def test_a_tool_with_no_declared_vendor_metadata_is_unaffected(
+        self, tmp_path: Path
+    ) -> None:
+        """Same policy as above -- a tool with no @declare_vendor_call
+        never has context.crud_action at all, so `context has crud_action`
+        is false and the forbid never activates."""
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_deletes")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has crud_action && context.crud_action == "delete" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="vendor-crud-unaffected-test", tenant="default")
+        mw = ParapetFunctionMiddleware(engine, caller)
+
+        def undeclared_tool(case_id: str) -> str:
+            return f"handled {case_id}"
+
+        fn = FunctionTool(name="undeclared_tool", func=undeclared_tool)
+        ctx = FunctionInvocationContext(function=fn, arguments={"case_id": "500x"})
+        called = {"ran": False}
+
+        async def call_next() -> None:
+            called["ran"] = True
+            ctx.result = undeclared_tool("500x")
+
+        await mw.process(ctx, call_next)
+
+        assert called["ran"] is True
+        assert ctx.result == "handled 500x"
 
 
 # ── identity claims passthrough ─────────────────────────────────────────────
