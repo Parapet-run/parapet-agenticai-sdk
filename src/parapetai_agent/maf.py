@@ -1393,6 +1393,15 @@ def build_middleware(
     auth-integrations.md §3/§8 Q2. Do not turn this on until the tenant's
     bundle has been reviewed for policies written against the old
     provider-scoped resource shape.
+
+    When a control plane IS configured, this kwarg is only the value used
+    before the first bundle ever arrives (and forever, if that control
+    plane never sends the field at all) -- the bundle response's own
+    `vendor_scoped_resources` field (Bootstrap.vendor_scoped_resources)
+    takes priority once available, so a tenant-level decision made on the
+    control-plane console is authoritative over whatever a caller
+    hardcodes here. Only meaningful as the actual value with no control
+    plane configured at all.
     """
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
@@ -1490,8 +1499,17 @@ def build_middleware(
             engine = boot.engine
             stop_event = boot.stop_event
             poll_thread = boot.thread
+            # Control-plane-resolved, once at bootstrap -- see Bootstrap's
+            # own docstring for why this doesn't hot-reload mid-process.
+            # Takes priority over the caller's own kwarg when a control
+            # plane is configured at all, so a tenant's console-driven
+            # rollout decision (auth-integrations.md §3/§8 Q2) is
+            # authoritative rather than silently overridden by whatever a
+            # customer happened to hardcode locally.
+            resolved_vendor_scoped_resources = boot.vendor_scoped_resources
         else:
             engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
+            resolved_vendor_scoped_resources = vendor_scoped_resources
 
         caller = Caller(agent_id=resolved_agent_id, tenant=tenant)
         chat_mw = ParapetChatMiddleware(
@@ -1501,13 +1519,13 @@ def build_middleware(
             content_checks=content_checks,
             groundedness=groundedness,
             judge=judge,
-            vendor_scoped_resources=vendor_scoped_resources,
+            vendor_scoped_resources=resolved_vendor_scoped_resources,
         )
         func_mw = ParapetFunctionMiddleware(
             engine,
             caller,
             alter_transforms=alter_transforms,
-            vendor_scoped_resources=vendor_scoped_resources,
+            vendor_scoped_resources=resolved_vendor_scoped_resources,
         )
         _middleware_registry[key] = _MiddlewareRegistryEntry(
             engine, chat_mw, func_mw, stop_event, poll_thread

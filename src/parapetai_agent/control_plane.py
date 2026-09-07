@@ -216,6 +216,7 @@ def poll_once(
     private_key: Ed25519PrivateKey | None = None,
     persist_to_disk: bool = True,
     on_bundle: Callable[[dict[str, str]], None] | None = None,
+    on_bundle_meta: Callable[[dict[str, Any]], None] | None = None,
 ) -> str | None:
     """One fetch-and-sync cycle. Returns the new digest (unchanged from
     last_digest if the bundle was 304/unmodified), or last_digest again on a
@@ -250,6 +251,15 @@ def poll_once(
     fetch-then-apply chain that ISN'T explicitly a best-effort network
     call.
 
+    on_bundle_meta, when given, is called with the FULL bundle response
+    dict (agent_id/digest/files/issued_at, plus whatever bundle-level
+    metadata the control plane adds over time -- e.g. `vendor_scoped_resources`,
+    auth-integrations.md §3/§8 Q2) on every successful (non-304) fetch --
+    unlike `on_bundle` above, which only ever sees `bundle["files"]`. A
+    separate callback rather than widening `on_bundle`'s own contract:
+    that would be a breaking change for any existing caller matching its
+    documented `dict[str, str]` shape.
+
     private_key, when given, is passed straight through to fetch_bundle()
     to sign the request -- see that function's own docstring."""
     try:
@@ -270,6 +280,8 @@ def poll_once(
             log.error("policy_apply_rejected", **result)
     if on_bundle is not None:
         on_bundle(bundle["files"])
+    if on_bundle_meta is not None:
+        on_bundle_meta(bundle)
     log.info("bundle_synced", digest=bundle["digest"], files=list(bundle["files"]))
     return str(bundle["digest"])
 
@@ -636,6 +648,12 @@ class Bootstrap:
     private_key: Ed25519PrivateKey | None = None
     stop_event: threading.Event | None = None
     thread: threading.Thread | None = None
+    # auth-integrations.md §3/§8 Q2: this tenant's control-plane-resolved
+    # opt-in for GovernanceHook's vendor_scoped_resources flag, read off
+    # the bundle response's own "vendor_scoped_resources" field (default
+    # False -- an older control plane that doesn't send this field yet,
+    # or no control plane at all, resolves to unchanged behavior).
+    vendor_scoped_resources: bool = False
 
     def stop(self, timeout: float | None = None) -> None:
         if self.stop_event is not None:
@@ -685,11 +703,25 @@ def bootstrap_engine(
 
     Either way the background poller keeps re-applying on its own cycle, so
     a control plane that comes back is picked up without a restart.
+
+    vendor_scoped_resources on the returned Bootstrap is the ONE exception
+    to that last sentence: it's read off the first successful bundle
+    response here and never updated again by the background poller (see
+    Bootstrap's own docstring) -- a tenant-level change an operator makes
+    on the control plane takes effect on this PEP's next full bootstrap
+    (process restart), not mid-process. Everything else this function
+    resolves from a bundle (policy, entities) genuinely hot-reloads via
+    the poller; this one field does not, because by the time the poller
+    is running, whichever adapter's build_middleware()/build_plugin()
+    already constructed its GovernanceHook(vendor_scoped_resources=...)
+    from this dataclass's value -- there is no live reference back to
+    update.
     """
     from parapetai_agent.policy.engine import PolicyEngine as _PolicyEngine
 
     resolved_policy_dir = Path(policy_dir)
     resolved_entities = Path(entities_path) if entities_path else None
+    bundle_meta: dict[str, Any] = {}
 
     # Ed25519 identity, registered BEFORE the first poll -- the control
     # plane rejects an unknown PEP, so this has to come first.
@@ -708,6 +740,7 @@ def bootstrap_engine(
             None,
             private_key=private_key,
             on_bundle=on_bundle,
+            on_bundle_meta=bundle_meta.update,
         )
         resolved_policy_dir = Path(persist_policy_dir)
         candidate = resolved_policy_dir / "entities.json"
@@ -725,10 +758,17 @@ def bootstrap_engine(
             private_key=private_key,
             persist_to_disk=False,
             on_bundle=on_bundle,
+            on_bundle_meta=bundle_meta.update,
         )
 
+    vendor_scoped_resources = bool(bundle_meta.get("vendor_scoped_resources", False))
+
     if not start_poller:
-        return Bootstrap(engine=engine, private_key=private_key)
+        return Bootstrap(
+            engine=engine,
+            private_key=private_key,
+            vendor_scoped_resources=vendor_scoped_resources,
+        )
 
     # Heartbeat immediately so the PEP appears in the fleet table with its
     # REAL generation/digest, rather than only after the first poll cycle.
@@ -761,4 +801,10 @@ def bootstrap_engine(
         name=poller_name,
     )
     thread.start()
-    return Bootstrap(engine=engine, private_key=private_key, stop_event=stop_event, thread=thread)
+    return Bootstrap(
+        engine=engine,
+        private_key=private_key,
+        stop_event=stop_event,
+        thread=thread,
+        vendor_scoped_resources=vendor_scoped_resources,
+    )

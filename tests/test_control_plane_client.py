@@ -17,6 +17,7 @@ from httpx import Response
 
 from parapetai_agent.control_plane import (
     BundleFetchError,
+    bootstrap_engine,
     default_pep_id,
     fetch_bundle,
     poll_once,
@@ -115,6 +116,53 @@ def test_poll_once_writes_bundle_and_returns_new_digest(tmp_path: Path) -> None:
 
     assert digest == "digest-v1"
     assert (policy_dir / "00-base.cedar").exists()
+
+
+@respx.mock
+def test_poll_once_on_bundle_meta_receives_the_full_bundle_dict(tmp_path: Path) -> None:
+    """on_bundle_meta is the escape hatch for bundle-level metadata beyond
+    files/digest (auth-integrations.md §3/§8 Q2's vendor_scoped_resources
+    is the first real user) -- unlike on_bundle, which only ever sees
+    bundle["files"]."""
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(
+        return_value=Response(
+            200,
+            json={
+                "agent_id": "pa-1",
+                "digest": "digest-v1",
+                "files": {"00-base.cedar": "permit (principal, action, resource);"},
+                "vendor_scoped_resources": True,
+            },
+        )
+    )
+    seen: dict[str, object] = {}
+
+    poll_once(
+        CONTROL_PLANE_URL,
+        "the-secret",
+        tmp_path / "policies",
+        None,
+        on_bundle_meta=seen.update,
+    )
+
+    assert seen["vendor_scoped_resources"] is True
+    assert seen["digest"] == "digest-v1"
+
+
+@respx.mock
+def test_poll_once_on_bundle_meta_not_called_on_304(tmp_path: Path) -> None:
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(return_value=Response(304))
+    calls: list[dict[str, object]] = []
+
+    poll_once(
+        CONTROL_PLANE_URL,
+        "the-secret",
+        tmp_path / "policies",
+        "already-current-digest",
+        on_bundle_meta=calls.append,
+    )
+
+    assert calls == []
 
 
 @respx.mock
@@ -281,3 +329,65 @@ def test_run_bundle_poller_sends_a_heartbeat_per_cycle_when_engine_given(tmp_pat
     )
 
     assert heartbeat_route.called
+
+
+def _mock_bootstrap_endpoints(vendor_scoped_resources: bool | None) -> None:
+    """Registers the two endpoints bootstrap_engine(start_poller=False)
+    actually calls: key registration and the bundle pull. `None` omits
+    the field entirely -- the "older control plane, or one that never
+    sends it" case Bootstrap.vendor_scoped_resources must still default
+    safely for."""
+    respx.post(f"{CONTROL_PLANE_URL}/api/v1/keys").mock(
+        return_value=Response(200, json={"status": "ok"})
+    )
+    files: dict[str, object] = {
+        "agent_id": "pa-1",
+        "digest": "d1",
+        "files": {"00-base.cedar": "permit (principal, action, resource);"},
+    }
+    if vendor_scoped_resources is not None:
+        files["vendor_scoped_resources"] = vendor_scoped_resources
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(return_value=Response(200, json=files))
+
+
+@respx.mock
+def test_bootstrap_engine_resolves_vendor_scoped_resources_true_from_bundle(
+    tmp_path: Path,
+) -> None:
+    _mock_bootstrap_endpoints(vendor_scoped_resources=True)
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    (policy_dir / "00-base.cedar").write_text("permit (principal, action, resource);")
+
+    boot = bootstrap_engine(
+        CONTROL_PLANE_URL,
+        "the-secret",
+        policy_dir=policy_dir,
+        pep_key_path=tmp_path / "pep-key.json",
+        start_poller=False,
+    )
+
+    assert boot.vendor_scoped_resources is True
+
+
+@respx.mock
+def test_bootstrap_engine_defaults_vendor_scoped_resources_false_when_absent(
+    tmp_path: Path,
+) -> None:
+    """An older control plane that doesn't send this field at all -- or a
+    tenant this plane hasn't turned it on for -- must resolve to unchanged
+    (False) behavior, never an implicit opt-in."""
+    _mock_bootstrap_endpoints(vendor_scoped_resources=None)
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    (policy_dir / "00-base.cedar").write_text("permit (principal, action, resource);")
+
+    boot = bootstrap_engine(
+        CONTROL_PLANE_URL,
+        "the-secret",
+        policy_dir=policy_dir,
+        pep_key_path=tmp_path / "pep-key.json",
+        start_poller=False,
+    )
+
+    assert boot.vendor_scoped_resources is False

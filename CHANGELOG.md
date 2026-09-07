@@ -23,6 +23,15 @@ All notable changes to this project are documented here. The format is based on
   tool never silently inherits whatever a provider-scoped `permit` already
   allows. Off by default: no existing bundle's resource-matching policies
   change behavior until this is explicitly turned on.
+- `bootstrap_engine()`'s returned `Bootstrap` now carries
+  `vendor_scoped_resources: bool`, resolved from the bundle response's own
+  `vendor_scoped_resources` field when a control plane is configured --
+  lets a control plane turn the flag above on per tenant without a code
+  change on the PEP side. Resolved once, at bootstrap (process start);
+  does not hot-reload mid-process on a later bundle poll (see
+  `Bootstrap`'s own docstring for why). `poll_once()` gained a matching
+  `on_bundle_meta` callback (the full bundle dict, not just `files`) that
+  this is built on.
 
 ### Fixed
 - `langgraph.py`'s `_tool_snapshot` read only `request.tool_call` (the raw

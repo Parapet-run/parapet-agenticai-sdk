@@ -997,8 +997,14 @@ def build_plugin(
             engine = boot.engine
             stop_event = boot.stop_event
             poll_thread = boot.thread
+            # See maf.build_middleware()'s own comment at this same point:
+            # control-plane-resolved (once, at bootstrap) takes priority
+            # over the caller's own kwarg once a control plane is
+            # configured at all.
+            resolved_vendor_scoped_resources = boot.vendor_scoped_resources
         else:
             engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
+            resolved_vendor_scoped_resources = vendor_scoped_resources
 
         caller = Caller(agent_id=resolved_agent_id, tenant=tenant)
         plugin = ParapetPlugin(
@@ -1007,7 +1013,7 @@ def build_plugin(
             alter_transforms=alter_transforms,
             content_checks=content_checks,
             trust_session_user_id=trust_session_user_id,
-            vendor_scoped_resources=vendor_scoped_resources,
+            vendor_scoped_resources=resolved_vendor_scoped_resources,
         )
         _plugin_registry[key] = _PluginRegistryEntry(engine, plugin, stop_event, poll_thread)
         return plugin
