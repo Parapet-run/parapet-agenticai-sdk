@@ -256,6 +256,7 @@ from parapetai_agent.scoped_data import effective_principal as _effective_princi
 from parapetai_agent.scoped_data import identity_from_bearer_token as identity_from_bearer_token
 from parapetai_agent.scoped_data import set_current_identity as set_current_identity
 from parapetai_agent.token_identity import TokenIdentityExtractor
+from parapetai_agent.vendor_calls import resolve_vendor_call as _resolve_vendor_call
 
 log = structlog.get_logger(__name__)
 
@@ -665,10 +666,13 @@ class ParapetChatMiddleware(ChatMiddleware):
         content_checks: ContentCheckConfig | None = None,
         groundedness: GroundednessConfig | None = None,
         judge: JudgeConfig | None = None,
+        vendor_scoped_resources: bool = False,
     ) -> None:
         self.engine = engine
         self.caller = caller
-        self.hook = GovernanceHook(engine, caller, on_decision=_audit)
+        self.hook = GovernanceHook(
+            engine, caller, on_decision=_audit, vendor_scoped_resources=vendor_scoped_resources
+        )
         self._alter_transforms = {**DEFAULT_ALTER_TRANSFORMS, **(alter_transforms or {})}
         # Tier-2 content checks (parapetai_agent/content_checks.py) -- only run
         # on the PRE-call snapshot (messages_preview), mirroring tier 1's
@@ -1031,10 +1035,13 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
         caller: Caller,
         *,
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
+        vendor_scoped_resources: bool = False,
     ) -> None:
         self.engine = engine
         self.caller = caller
-        self.hook = GovernanceHook(engine, caller, on_decision=_audit)
+        self.hook = GovernanceHook(
+            engine, caller, on_decision=_audit, vendor_scoped_resources=vendor_scoped_resources
+        )
         self._alter_transforms = {**DEFAULT_ALTER_TRANSFORMS, **(alter_transforms or {})}
 
     async def process(
@@ -1051,15 +1058,20 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
         ) as span:
             identity_claims = _identity_claims(context.kwargs)
             identity_roles = _identity_roles(context.kwargs)
+            tool_args = _model_to_dict(context.arguments)
+            vendor = _resolve_vendor_call(getattr(context.function, "func", None), tool_args)
             snapshot = Snapshot(
                 provider=chat.provider,
                 endpoint="in-process:maf:tool_call",
                 model=chat.model,
                 parsed=True,
                 tool_name=context.function.name,
-                tool_args=_model_to_dict(context.arguments),
+                tool_args=tool_args,
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                vendor_system=vendor[0] if vendor else None,
+                vendor_operation=vendor[1] if vendor else None,
+                crud_action=vendor[2] if vendor else None,
             )
             _set_oi_attributes(
                 span,
@@ -1107,6 +1119,9 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 tool_result_preview=str(context.result)[:_PREVIEW_CHARS],
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                vendor_system=vendor[0] if vendor else None,
+                vendor_operation=vendor[1] if vendor else None,
+                crud_action=vendor[2] if vendor else None,
             )
             # Tool calls consume no LLM tokens of their own, so nothing is
             # recorded here (record() is a model_call-only concern) -- but
@@ -1190,6 +1205,7 @@ def build_middleware(
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
     console: bool = True,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
+    vendor_scoped_resources: bool = False,
 ) -> tuple[ParapetChatMiddleware, ParapetFunctionMiddleware]:
     """One PolicyEngine, one Caller, both middleware -- the pairing this
     module is designed around; register both on the same Agent so
@@ -1364,6 +1380,19 @@ def build_middleware(
     as local_log_dir/persist_policy_dir -- affects construction, not
     identity; the first build_middleware() call for a given identity's
     registry wins for every later call that reuses the cached middleware.
+
+    vendor_scoped_resources (default False): opt-in resource construction
+    for tool calls whose function was decorated with
+    parapetai_agent.vendor_calls.declare_vendor_call -- resolves to
+    `Resource::"<vendor_system>/<vendor_operation>"` instead of the default
+    `Resource::"<provider>"`, and an undeclared tool resolves to the
+    distinct `Resource::"undeclared"` rather than silently inheriting
+    whatever a provider-scoped rule already permits. Off by default because
+    it changes what an existing bundle's tool_call policies match against
+    -- see policy/hooks.py's GovernanceHook._build_resource() docstring and
+    auth-integrations.md §3/§8 Q2. Do not turn this on until the tenant's
+    bundle has been reviewed for policies written against the old
+    provider-scoped resource shape.
     """
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
@@ -1472,8 +1501,14 @@ def build_middleware(
             content_checks=content_checks,
             groundedness=groundedness,
             judge=judge,
+            vendor_scoped_resources=vendor_scoped_resources,
         )
-        func_mw = ParapetFunctionMiddleware(engine, caller, alter_transforms=alter_transforms)
+        func_mw = ParapetFunctionMiddleware(
+            engine,
+            caller,
+            alter_transforms=alter_transforms,
+            vendor_scoped_resources=vendor_scoped_resources,
+        )
         _middleware_registry[key] = _MiddlewareRegistryEntry(
             engine, chat_mw, func_mw, stop_event, poll_thread
         )

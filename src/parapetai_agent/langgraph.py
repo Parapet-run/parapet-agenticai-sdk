@@ -89,6 +89,10 @@ from parapetai_agent.scoped_data import effective_principal as _effective_princi
 from parapetai_agent.scoped_data import governed_identity as governed_identity
 from parapetai_agent.scoped_data import identity_from_bearer_token as identity_from_bearer_token
 from parapetai_agent.scoped_data import set_current_identity as set_current_identity
+from parapetai_agent.vendor_calls import resolve_vendor_call as _resolve_vendor_call
+from parapetai_agent.vendor_calls import (
+    resolve_vendor_call_from_metadata as _resolve_vendor_call_from_metadata,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -121,10 +125,14 @@ class ParapetAgentMiddleware(AgentMiddleware):
     actually constructing an agent and denying a real tool call, not
     inferred from the type signature alone."""
 
-    def __init__(self, engine: PolicyEngine, caller: Caller) -> None:
+    def __init__(
+        self, engine: PolicyEngine, caller: Caller, *, vendor_scoped_resources: bool = False
+    ) -> None:
         self.engine = engine
         self.caller = caller
-        self.hook = GovernanceHook(engine, caller, on_decision=_audit)
+        self.hook = GovernanceHook(
+            engine, caller, on_decision=_audit, vendor_scoped_resources=vendor_scoped_resources
+        )
 
     # ------------------------------------------------------------------ #
     # model call -- pre (Cedar model_call) then post (Cedar post)
@@ -212,14 +220,29 @@ class ParapetAgentMiddleware(AgentMiddleware):
 
     def _tool_snapshot(self, request: ToolCallRequest) -> tuple[Snapshot, str]:
         tool_call = request.tool_call
+        tool_args = dict(tool_call.get("args") or {})
+        # request.tool -- the resolved BaseTool, with a native `.metadata`
+        # dict and (for a StructuredTool) `.func` back to the underlying
+        # callable -- used to be read nowhere in this method (a real,
+        # previously-shipped gap: auth-integrations.md finding #3). `tool`
+        # is None for a tool not registered with the ToolNode; fall back to
+        # the raw tool_call dict alone in that case, same as before this
+        # fix existed.
+        tool = request.tool
+        vendor = _resolve_vendor_call_from_metadata(
+            getattr(tool, "metadata", None)
+        ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
         snapshot = Snapshot(
             provider="langgraph",
             endpoint="in-process:langgraph:tool_call",
             parsed=True,
             tool_name=str(tool_call.get("name", "")),
-            tool_args=dict(tool_call.get("args") or {}),
+            tool_args=tool_args,
             identity_claims=_effective_identity_claims(None),
             identity_roles=_effective_identity_roles(None),
+            vendor_system=vendor[0] if vendor else None,
+            vendor_operation=vendor[1] if vendor else None,
+            crud_action=vendor[2] if vendor else None,
         )
         return snapshot, _effective_principal(self.caller)
 
@@ -290,6 +313,7 @@ def build_middleware(
     persist_pep_key: bool = True,
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
     console: bool = True,
+    vendor_scoped_resources: bool = False,
 ) -> ParapetAgentMiddleware:
     """One PolicyEngine, one Caller, one ParapetAgentMiddleware -- the
     LangGraph/LangChain equivalent of `parapetai_agent.maf.build_middleware()`/
@@ -310,7 +334,11 @@ def build_middleware(
         agent = create_agent(model, tools=tools, middleware=[mw])
 
     No `alter_transforms=` parameter -- ALTER decisions are not yet
-    supported by this adapter (see module docstring's Known Gaps)."""
+    supported by this adapter (see module docstring's Known Gaps).
+
+    vendor_scoped_resources: see maf.build_middleware()'s own docstring --
+    same opt-in, off-by-default flag, same reason (auth-integrations.md
+    §3/§8 Q2)."""
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
 
@@ -371,7 +399,9 @@ def build_middleware(
             engine = PolicyEngine(resolved_policy_dir, resolved_entities_path)
 
         caller = Caller(agent_id=resolved_agent_id, tenant=tenant)
-        middleware = ParapetAgentMiddleware(engine, caller)
+        middleware = ParapetAgentMiddleware(
+            engine, caller, vendor_scoped_resources=vendor_scoped_resources
+        )
         _middleware_registry[key] = _MiddlewareRegistryEntry(
             engine, middleware, stop_event, poll_thread
         )

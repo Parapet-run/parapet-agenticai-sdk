@@ -46,6 +46,13 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+#: Single source of truth for the heartbeat `mode` field's default -- used to
+#: be "enforce" in bootstrap_engine() and "" in run_bundle_poller(), so a
+#: caller of the lower-level poller directly (bypassing bootstrap_engine)
+#: reported a blank mode to the fleet dashboard instead of an explicit one.
+#: auth-integrations.md finding #15.
+DEFAULT_MODE = "enforce"
+
 
 def default_pep_id() -> str:
     """Stable for the lifetime of one process -- generated once at import,
@@ -517,7 +524,7 @@ def run_bundle_poller(
     engine: PolicyEngine | None = None,
     pep_id: str | None = None,
     version: str = "",
-    mode: str = "",
+    mode: str = DEFAULT_MODE,
     stop_event: threading.Event | None = None,
     private_key: Ed25519PrivateKey | None = None,
     key_path: str | Path | None = None,
@@ -645,7 +652,7 @@ def bootstrap_engine(
     entities_path: str | Path | None = None,
     persist_policy_dir: str | Path | None = None,
     pep_key_path: str | Path | None = None,
-    mode: str = "enforce",
+    mode: str = DEFAULT_MODE,
     version: str = "",
     poller_name: str = "bundle-poll",
     on_bundle: Callable[[dict[str, str]], None] | None = None,

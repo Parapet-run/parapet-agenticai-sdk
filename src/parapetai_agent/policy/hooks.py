@@ -159,10 +159,20 @@ class GovernanceHook:
         caller: Caller,
         *,
         on_decision: OnDecision | None = None,
+        vendor_scoped_resources: bool = False,
     ) -> None:
         self.engine = engine
         self.caller = caller
         self._on_decision = on_decision or _default_on_decision
+        # Opt-in, default off (auth-integrations.md §3/§8 Q2): a tenant's
+        # existing bundle may already have a tool_call policy written as
+        # `resource == Resource::"<provider>"` -- flipping resource
+        # construction to vendor/operation-scoped for everyone by default
+        # would silently stop that policy from ever matching again. Off
+        # keeps this byte-for-byte the old behavior; a caller turns it on
+        # only once it has confirmed its tenant's policies target the new
+        # vendor-scoped resource shape instead.
+        self._vendor_scoped_resources = vendor_scoped_resources
 
     def evaluate(
         self,
@@ -197,7 +207,7 @@ class GovernanceHook:
         whose extra_context WOULD carry raw text must not rely on this
         function to redact it; nothing here inspects the values."""
         resolved_principal = principal or self.caller.principal
-        resource = f'Resource::"{snapshot.provider}"'
+        resource = self._build_resource(snapshot)
         full_context = full_context_for(snapshot, self.caller)
         if extra_context:
             full_context = {**full_context, **extra_context}
@@ -219,6 +229,30 @@ class GovernanceHook:
         )
         alter_with = decision.annotations.get("alter_with") if decision.allowed else None
         return HookResult(decision=decision, alter_with=alter_with)
+
+    def _build_resource(self, snapshot: Snapshot) -> str:
+        """Provider-scoped (`Resource::"openai"`) by default -- unchanged
+        from every prior version of this method, so an existing bundle's
+        `resource == Resource::"<provider>"` policies keep matching exactly
+        as before regardless of this flag's value on a genuine model_call.
+
+        With `vendor_scoped_resources` on (auth-integrations.md §3): a tool
+        call with declared vendor metadata resolves to
+        `Resource::"<vendor_system>/<vendor_operation>"` instead, so
+        Salesforce and ServiceNow tool calls stop colliding on one shared
+        `Resource::"<llm-provider>"` resource. A tool call with NO declared
+        vendor metadata resolves to the distinct `Resource::"undeclared"`
+        -- never silently falls back to the provider-scoped resource, which
+        would let a broad pre-existing `permit(resource ==
+        Resource::"<provider>")` rule cover an unclassified tool by
+        accident (finding #11) -- an explicit `forbid` on `undeclared` is
+        how a fail-closed deployment is meant to handle this case."""
+        if self._vendor_scoped_resources:
+            if snapshot.vendor_system:
+                return f'Resource::"{snapshot.vendor_system}/{snapshot.vendor_operation}"'
+            if snapshot.tool_name:
+                return 'Resource::"undeclared"'
+        return f'Resource::"{snapshot.provider}"'
 
 
 def full_context_for(snapshot: Snapshot, caller: Caller) -> dict[str, Any]:

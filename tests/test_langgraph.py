@@ -59,6 +59,21 @@ def execute_shell(command: str) -> str:
     return f"ran: {command}"
 
 
+@tool
+def delete_salesforce_case(case_id: str) -> str:
+    """Delete a Salesforce case."""
+    return case_id
+
+
+# LangChain's @tool decorator has no metadata= kwarg -- set post-hoc, same
+# as a real caller would (delete_salesforce_case.metadata = {...}).
+delete_salesforce_case.metadata = {
+    "parapet_vendor_system": "salesforce",
+    "parapet_resource_type": "Case",
+    "parapet_crud_action": "delete",
+}
+
+
 def _agent(tool_name: str, args: dict, middleware: ParapetAgentMiddleware):
     model = _FakeModel(
         messages=iter(
@@ -68,7 +83,9 @@ def _agent(tool_name: str, args: dict, middleware: ParapetAgentMiddleware):
             ]
         )
     )
-    return create_agent(model, tools=[lookup_order, execute_shell], middleware=[middleware])
+    return create_agent(
+        model, tools=[lookup_order, execute_shell, delete_salesforce_case], middleware=[middleware]
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +133,28 @@ def test_tool_call_denied_raises_and_never_runs(tmp_path: Path) -> None:
     # resolution is a private helper used only for a REVIEW decision's
     # reason text (policy/engine.py's _policy_labels()), not for a plain
     # hard deny like this one. Assert the shape, not a specific literal.
+    assert len(exc_info.value.decision.determining_policies) == 1
+
+
+def test_tool_call_reads_vendor_metadata_off_request_tool(tmp_path: Path) -> None:
+    """Finding #3: _tool_snapshot used to read only request.tool_call (the
+    raw {name, args, id} dict), never request.tool -- so a LangChain
+    tool's own `.metadata` was completely unreachable by any Cedar
+    decision. A forbid keyed on context.crud_action can only fire if
+    _tool_snapshot actually resolved it from request.tool.metadata."""
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("no_deletes")\n'
+        'forbid(principal, action == Action::"tool_call", resource)\n'
+        'when { context has crud_action && context.crud_action == "delete" };',
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+    agent = _agent("delete_salesforce_case", {"case_id": "500x"}, mw)
+    with pytest.raises(GovernanceDenied) as exc_info:
+        agent.invoke({"messages": [{"role": "user", "content": "x"}]})
     assert len(exc_info.value.decision.determining_policies) == 1
 
 

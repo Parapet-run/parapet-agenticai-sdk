@@ -69,6 +69,17 @@ class Snapshot:
     # `roles` claim (e.g. Entra ID app roles) by whoever authenticated the
     # caller -- this dataclass does not validate a token itself.
     identity_roles: list[str] = field(default_factory=list)
+    # Declared vendor/CRUD facts about a tool call (parapetai_agent.vendor_calls),
+    # set only for a tool whose function was decorated with
+    # @declare_vendor_call or whose framework-native metadata dict resolved
+    # via resolve_vendor_call_from_metadata() -- None for every model_call
+    # and for a tool call with no declared vendor metadata at all. Declared,
+    # not observed: same trust class as tool_name (see vendor_calls.py's
+    # module docstring) -- there is no verification against what the tool
+    # actually does over the wire (auth-integrations.md §7, not built yet).
+    vendor_system: str | None = None
+    vendor_operation: str | None = None
+    crud_action: str | None = None
 
     def to_context(self) -> dict[str, Any]:
         ctx: dict[str, Any] = {
@@ -87,6 +98,10 @@ class Snapshot:
         if self.tool_name:
             ctx["tool_name"] = self.tool_name
             ctx["tool_args"] = self.tool_args
+        if self.vendor_system:
+            ctx["vendor_system"] = self.vendor_system
+            ctx["vendor_operation"] = self.vendor_operation
+            ctx["crud_action"] = self.crud_action
         if self.response_preview:
             ctx["response_preview"] = self.response_preview
         if self.tool_result_preview:

@@ -266,3 +266,104 @@ def test_custom_on_decision_called_exactly_once(tmp_path: Path) -> None:
 
     hook.evaluate(snapshot=snapshot, stage="pre")
     assert len(calls) == 1
+
+
+def _resource_seen(hook: GovernanceHook, snapshot: Snapshot) -> str:
+    seen: list[str] = []
+
+    original = hook._on_decision
+
+    def spy(decision: Decision, principal: str, snap: Snapshot, resource: str, ctx: dict) -> None:
+        seen.append(resource)
+        original(decision, principal, snap, resource, ctx)
+
+    hook._on_decision = spy  # type: ignore[method-assign]
+    hook.evaluate(snapshot=snapshot, stage="pre")
+    return seen[0]
+
+
+def test_resource_is_provider_scoped_by_default(tmp_path: Path) -> None:
+    """auth-integrations.md §3/§8 Q2: vendor-scoped resources are opt-in --
+    default (vendor_scoped_resources=False) must stay byte-for-byte the old
+    `Resource::"<provider>"` shape for a tool call with declared vendor
+    metadata too, so an existing bundle's provider-scoped policies keep
+    matching unchanged until a tenant explicitly opts in."""
+    engine = _permit_all_engine(tmp_path)
+    caller = Caller(agent_id="a1", tenant="default")
+    hook = GovernanceHook(engine, caller)
+    snapshot = Snapshot(
+        provider="openai",
+        endpoint="in-process:test:tool_call",
+        parsed=True,
+        tool_name="delete_salesforce_case",
+        vendor_system="salesforce",
+        vendor_operation="Case.delete",
+        crud_action="delete",
+    )
+    assert _resource_seen(hook, snapshot) == 'Resource::"openai"'
+
+
+def test_resource_is_vendor_scoped_when_declared_and_flag_on(tmp_path: Path) -> None:
+    engine = _permit_all_engine(tmp_path)
+    caller = Caller(agent_id="a1", tenant="default")
+    hook = GovernanceHook(engine, caller, vendor_scoped_resources=True)
+    snapshot = Snapshot(
+        provider="openai",
+        endpoint="in-process:test:tool_call",
+        parsed=True,
+        tool_name="delete_salesforce_case",
+        vendor_system="salesforce",
+        vendor_operation="Case.delete",
+        crud_action="delete",
+    )
+    assert _resource_seen(hook, snapshot) == 'Resource::"salesforce/Case.delete"'
+
+
+def test_resource_is_undeclared_for_a_tool_call_with_no_vendor_metadata(tmp_path: Path) -> None:
+    """Finding #11: an undeclared tool must resolve to a distinct resource,
+    never silently inherit whatever a broad provider-scoped rule already
+    permits."""
+    engine = _permit_all_engine(tmp_path)
+    caller = Caller(agent_id="a1", tenant="default")
+    hook = GovernanceHook(engine, caller, vendor_scoped_resources=True)
+    snapshot = Snapshot(
+        provider="openai",
+        endpoint="in-process:test:tool_call",
+        parsed=True,
+        tool_name="some_undeclared_tool",
+    )
+    assert _resource_seen(hook, snapshot) == 'Resource::"undeclared"'
+
+
+def test_resource_stays_provider_scoped_for_a_genuine_model_call_even_when_flag_on(
+    tmp_path: Path,
+) -> None:
+    """A model_call snapshot never carries vendor_system, so the flag must
+    not change model_call resource construction at all."""
+    engine = _permit_all_engine(tmp_path)
+    caller = Caller(agent_id="a1", tenant="default")
+    hook = GovernanceHook(engine, caller, vendor_scoped_resources=True)
+    snapshot = Snapshot(provider="openai", endpoint="in-process:test:model_call", parsed=True)
+    assert _resource_seen(hook, snapshot) == 'Resource::"openai"'
+
+
+def test_content_free_does_not_strip_vendor_crud_metadata() -> None:
+    """vendor_system/vendor_operation/crud_action are structured metadata,
+    same category as tool_name -- never stripped by content_free(), unlike
+    the raw text preview fields (invariant 10)."""
+    ctx = {
+        "provider": "openai",
+        "tool_name": "delete_salesforce_case",
+        "vendor_system": "salesforce",
+        "vendor_operation": "Case.delete",
+        "crud_action": "delete",
+        "messages_preview": "should be stripped",
+    }
+    stripped = content_free(ctx)
+    assert stripped == {
+        "provider": "openai",
+        "tool_name": "delete_salesforce_case",
+        "vendor_system": "salesforce",
+        "vendor_operation": "Case.delete",
+        "crud_action": "delete",
+    }

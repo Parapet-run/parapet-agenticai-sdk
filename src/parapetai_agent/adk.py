@@ -189,6 +189,10 @@ from parapetai_agent.scoped_data import effective_principal as _effective_princi
 from parapetai_agent.scoped_data import governed_identity as governed_identity
 from parapetai_agent.scoped_data import identity_from_bearer_token as identity_from_bearer_token
 from parapetai_agent.scoped_data import set_current_identity as set_current_identity
+from parapetai_agent.vendor_calls import resolve_vendor_call as _resolve_vendor_call
+from parapetai_agent.vendor_calls import (
+    resolve_vendor_call_from_metadata as _resolve_vendor_call_from_metadata,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -477,11 +481,14 @@ class ParapetPlugin(BasePlugin):
         content_checks: ContentCheckConfig | None = None,
         plugin_name: str = "parapetai",
         trust_session_user_id: bool = False,
+        vendor_scoped_resources: bool = False,
     ) -> None:
         super().__init__(name=plugin_name)
         self.engine = engine
         self.caller = caller
-        self.hook = GovernanceHook(engine, caller, on_decision=_audit)
+        self.hook = GovernanceHook(
+            engine, caller, on_decision=_audit, vendor_scoped_resources=vendor_scoped_resources
+        )
         self._alter_transforms = {**DEFAULT_ALTER_TRANSFORMS, **(alter_transforms or {})}
         # Tier-2 content checks (parapetai_agent/content_checks.py), pre-call
         # only -- same scope as maf.py's own. None means "no tier-2
@@ -712,6 +719,14 @@ class ParapetPlugin(BasePlugin):
         if _log_content_enabled():
             _set_oi_attributes(span, {oi.TOOL_PARAMETERS: json.dumps(tool_args, default=str)})
 
+        # custom_metadata (ADK-native, already documented upstream for "tool
+        # manifests") takes priority over the decorator path -- it's the
+        # only option for a tool this codebase doesn't own the source of
+        # (e.g. a third-party MCP server surfaced as an ADK tool, which
+        # can't carry a @declare_vendor_call decorator at all).
+        vendor = _resolve_vendor_call_from_metadata(
+            getattr(tool, "custom_metadata", None)
+        ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
         snapshot = Snapshot(
             provider=correlation.provider,
             endpoint="in-process:adk:tool_call",
@@ -721,6 +736,9 @@ class ParapetPlugin(BasePlugin):
             tool_args=dict(tool_args),
             identity_claims=correlation.identity_claims,
             identity_roles=correlation.identity_roles,
+            vendor_system=vendor[0] if vendor else None,
+            vendor_operation=vendor[1] if vendor else None,
+            crud_action=vendor[2] if vendor else None,
         )
         # COST-TRACK-1: scope_id is the TRIGGERING model_call's own span id
         # (via `correlation`, the SAME link this tool_call span was parented
@@ -763,6 +781,9 @@ class ParapetPlugin(BasePlugin):
         try:
             if span is not None and _log_content_enabled():
                 _set_oi_attributes(span, {oi.OUTPUT_VALUE: json.dumps(result, default=str)})
+            vendor = _resolve_vendor_call_from_metadata(
+                getattr(tool, "custom_metadata", None)
+            ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
             response_snapshot = Snapshot(
                 provider=correlation.provider,
                 endpoint="in-process:adk:tool_call",
@@ -772,6 +793,9 @@ class ParapetPlugin(BasePlugin):
                 tool_result_preview=json.dumps(result, default=str)[:_PREVIEW_CHARS],
                 identity_claims=correlation.identity_claims,
                 identity_roles=correlation.identity_roles,
+                vendor_system=vendor[0] if vendor else None,
+                vendor_operation=vendor[1] if vendor else None,
+                crud_action=vendor[2] if vendor else None,
             )
             trace_id, scope_id = _tool_call_cost_ids(correlation, span) if span else (None, None)
             post = self.hook.evaluate(
@@ -859,6 +883,7 @@ def build_plugin(
     console: bool = True,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     trust_session_user_id: bool = False,
+    vendor_scoped_resources: bool = False,
 ) -> ParapetPlugin:
     """One PolicyEngine, one Caller, one ParapetPlugin -- the ADK
     equivalent of parapetai_agent.maf.build_middleware(), same kwarg
@@ -869,6 +894,10 @@ def build_plugin(
     is MAF-specific (control_plane/pep_identity/governance_runtime are
     already framework-agnostic, confirmed during this module's own
     construction).
+
+    vendor_scoped_resources: see maf.build_middleware()'s own docstring --
+    same opt-in, off-by-default flag, same reason (auth-integrations.md
+    §3/§8 Q2).
 
     trust_session_user_id is ADK-specific (MAF has no equivalent, since
     MAF's AgentSession carries no user_id at all): default False, meaning
@@ -978,6 +1007,7 @@ def build_plugin(
             alter_transforms=alter_transforms,
             content_checks=content_checks,
             trust_session_user_id=trust_session_user_id,
+            vendor_scoped_resources=vendor_scoped_resources,
         )
         _plugin_registry[key] = _PluginRegistryEntry(engine, plugin, stop_event, poll_thread)
         return plugin
