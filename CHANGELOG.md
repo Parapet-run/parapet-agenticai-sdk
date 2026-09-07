@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0]
+
+### Added
+- **HTTP/gRPC corroboration, Tier 1** (auth-integrations.md §7):
+  `parapetai_agent.corroboration.enable_http_corroboration()` turns on real
+  OpenTelemetry auto-instrumentation for `httpx`/`requests`/`urllib3`/
+  `aiohttp`/`grpc` (new `parapetai-agent[corroboration]` extra), so a real
+  network call a tool makes during its own execution -- however many
+  layers of vendor SDK wrap it -- emits a span correctly correlated to
+  that tool's own `parapetai.tool_call` span. Safe to call unconditionally:
+  each candidate self-detects whether its target library is installed and
+  no-ops rather than raising if not (`BaseInstrumentor`'s own dependency
+  check), and calling it more than once is a no-op past the first time.
+  `disable_http_corroboration()` reverses it. Deliberately capture-only in
+  this release: comparing the resulting span against a tool's declared
+  `crud_action` and any enforcement consequence is separate, not-yet-built
+  work -- see the module's own docstring for why that's a control-plane
+  analysis problem once the signal exists, not new SDK machinery. **Call
+  this after, not before, `configure_otel()`** -- an instrumentor captures
+  its tracer at `instrument()` time and does not observe a later
+  `TracerProvider` change (documented prominently in the module's own
+  docstring after hitting this live while building it).
+
 ## [0.7.0]
 
 ### Added
