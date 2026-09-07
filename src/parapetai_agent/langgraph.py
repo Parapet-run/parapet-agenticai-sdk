@@ -41,7 +41,11 @@ doesn't exist yet:
   model name, `parapetai.model_call` span). Decisions still reach OTel as
   LogRecords via `governance_runtime.audit()` (the same sink MAF/ADK
   use) -- what's missing is the additional per-call *span*, not decision
-  observability entirely.
+  observability entirely. Cumulative cost/token tracking (below) does NOT
+  depend on this gap being closed -- it derives its own trace/span ids
+  from `before_agent`/`after_agent`/`wrap_model_call` rather than from an
+  OTel `SpanContext` the way `maf.py`/`adk.py` do, since no such
+  `SpanContext` exists here yet.
 - **Streaming has not been verified against a live streaming
   `.astream()`/`.stream()` call** -- treat as unverified, not assumed
   either way, the same caution `adk.py`'s own docstring applies to its own
@@ -50,6 +54,7 @@ doesn't exist yet:
 
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
 from collections.abc import Awaitable, Callable
@@ -78,8 +83,12 @@ from parapetai_agent.governance_runtime import record_tool_denial as _record_too
 from parapetai_agent.governance_runtime import resolve_policy_source as _resolve_policy_source
 from parapetai_agent.governance_runtime import track_tool_denials as track_tool_denials
 from parapetai_agent.identity import ANONYMOUS, Caller
+from parapetai_agent.policy.cost_tracker import CostTracker
+from parapetai_agent.policy.cost_tracker import new_span_id as _new_span_id
+from parapetai_agent.policy.cost_tracker import new_trace_id as _new_trace_id
 from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_agent.policy.hooks import GovernanceHook
+from parapetai_agent.policy.pricing import estimate_cost_usd_micros
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.scoped_data import agent_identity as agent_identity
 from parapetai_agent.scoped_data import current_identity as current_identity
@@ -97,6 +106,62 @@ from parapetai_agent.vendor_calls import (
 log = structlog.get_logger(__name__)
 
 _PREVIEW_CHARS = 4000
+
+# One CostTracker per process, same pattern as maf.py/adk.py's own
+# module-level _cost_tracker -- trace_id is globally unique (random hex),
+# so sharing is safe and avoids a second instance per ParapetAgentMiddleware.
+_cost_tracker = CostTracker()
+
+# TRACE = one before_agent/after_agent bracket (the whole agent.invoke()/
+# ainvoke() run). SPAN = one model_call turn plus whatever tool_call(s) it
+# triggers. Unlike maf.py/adk.py, there is no OTel SpanContext to derive
+# these from yet (see module docstring's Known Gaps), so they're generated
+# here and threaded through contextvars -- the same mechanism, and the
+# same reason, as maf.py's _current_chat: correctly isolated per asyncio
+# task under concurrent agent.invoke() calls sharing one middleware
+# instance, where a plain instance attribute would leak across concurrent
+# runs. `_current_span_id` is set once per wrap_model_call/awrap_model_call
+# and deliberately LEFT SET rather than reset in a finally -- confirmed
+# live (a scripted multi-turn tool-calling run) that before_agent,
+# wrap_model_call, wrap_tool_call, wrap_model_call, after_agent fire as
+# SEPARATE, SEQUENTIAL steps, never nested, so a reset-on-return would
+# clear it before the tool_call that needs it ever reads it -- exactly the
+# bug _current_chat's own docstring in maf.py describes hitting once.
+_current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "parapetai_agent_langgraph_current_trace_id", default=None
+)
+_current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "parapetai_agent_langgraph_current_span_id", default=None
+)
+
+
+def _usage_tokens(response: ModelResponse) -> tuple[int, int, int]:
+    """(prompt_tokens, completion_tokens, total_tokens) from the last
+    message in the response that carries a populated `usage_metadata` --
+    not every provider populates it (confirmed: langchain_core's own
+    GenericFakeChatModel doesn't), and an absent value must read as "no
+    usage known" (all zeros), never raise."""
+    for message in reversed(response.result):
+        usage = getattr(message, "usage_metadata", None)
+        if usage:
+            prompt = int(usage.get("input_tokens") or 0)
+            completion = int(usage.get("output_tokens") or 0)
+            total = int(usage.get("total_tokens") or 0) or (prompt + completion)
+            return prompt, completion, total
+    return 0, 0, 0
+
+
+@dataclass(slots=True)
+class _ModelCallScope:
+    """Cost-tracking correlation for one model_call turn -- trace_id
+    persists for the whole agent run (from before_agent, or a fresh
+    one-off if before_agent never fired -- see its own docstring); span_id
+    is fresh per turn and shared with whatever tool_call(s) this turn goes
+    on to trigger."""
+
+    trace_id: str
+    span_id: str
+    model: str | None
 
 
 def _message_text(message: Any) -> str:
@@ -135,30 +200,79 @@ class ParapetAgentMiddleware(AgentMiddleware):
         )
 
     # ------------------------------------------------------------------ #
+    # trace boundary -- cumulative cost/token tracking scope only (no
+    # Cedar decision here). See docs/reference/cost-tracking.md.
+    # ------------------------------------------------------------------ #
+
+    def before_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        _current_trace_id.set(_new_trace_id())
+        return None
+
+    async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        _current_trace_id.set(_new_trace_id())
+        return None
+
+    def after_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        self._end_trace()
+        return None
+
+    async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        self._end_trace()
+        return None
+
+    def _end_trace(self) -> None:
+        # Unlike maf.py/adk.py (which rely purely on CostTracker's LRU to
+        # eventually bound memory, since neither has a reliable
+        # "trace ended" callback -- see cost_tracker.py's own docstring),
+        # before_agent/after_agent genuinely DO bracket one whole run here,
+        # so calling end_trace() as a courtesy is the honest default, not
+        # just an optimization.
+        trace_id = _current_trace_id.get()
+        if trace_id is not None:
+            _cost_tracker.end_trace(trace_id)
+        _current_trace_id.set(None)
+        _current_span_id.set(None)
+
+    # ------------------------------------------------------------------ #
     # model call -- pre (Cedar model_call) then post (Cedar post)
     # ------------------------------------------------------------------ #
 
     def _pre_model_snapshot(
         self, request: ModelRequest
-    ) -> tuple[Snapshot, str, dict[str, str], list[str]]:
+    ) -> tuple[Snapshot, str, dict[str, str], list[str], _ModelCallScope, dict[str, int]]:
         texts = [_message_text(m) for m in request.messages]
         declared_tools = [
             getattr(t, "name", None) for t in request.tools if getattr(t, "name", None)
         ]
         identity_claims = _effective_identity_claims(None)
         identity_roles = _effective_identity_roles(None)
+        model_name = getattr(request.model, "model_name", None) or getattr(
+            request.model, "model", None
+        )
         snapshot = Snapshot(
             provider="langgraph",
             endpoint="in-process:langgraph:model_call",
-            model=getattr(request.model, "model_name", None)
-            or getattr(request.model, "model", None),
+            model=model_name,
             parsed=True,
             messages_preview=" ".join(t for t in texts if t)[:_PREVIEW_CHARS],
             declared_tools=[str(t) for t in declared_tools],
             identity_claims=identity_claims,
             identity_roles=identity_roles,
         )
-        return snapshot, _effective_principal(self.caller), identity_claims, identity_roles
+        # COST-TRACK: trace_id is whatever before_agent set for this run (a
+        # fresh one-off if it never fired -- e.g. an older langchain
+        # missing the before_agent hook, or this middleware invoked some
+        # other way); span_id is fresh per turn and left SET (not reset)
+        # so the tool_call(s) this turn triggers -- fired as separate,
+        # later graph steps, not nested inside this method -- correlate
+        # into the SAME span. See the module-level contextvar comments.
+        trace_id = _current_trace_id.get() or _new_trace_id()
+        span_id = _new_span_id()
+        _current_span_id.set(span_id)
+        scope = _ModelCallScope(trace_id=trace_id, span_id=span_id, model=model_name)
+        cost_context = _cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)
+        principal = _effective_principal(self.caller)
+        return snapshot, principal, identity_claims, identity_roles, scope, cost_context
 
     def _post_model_snapshot(
         self, response: ModelResponse, identity_claims: dict[str, str], identity_roles: list[str]
@@ -173,20 +287,44 @@ class ParapetAgentMiddleware(AgentMiddleware):
             identity_roles=identity_roles,
         )
 
+    def _record_usage(self, scope: _ModelCallScope, response: ModelResponse) -> dict[str, int]:
+        """Records this call's usage (if any was reported) against
+        scope.trace_id/span_id, then returns the cumulative totals
+        AFTER that recording -- so the post-stage Cedar decision sees the
+        up-to-date picture, not the pre-call snapshot. Mirrors maf.py's
+        own COST-TRACK-1 comment at the equivalent point."""
+        prompt_tok, completion_tok, total_tok = _usage_tokens(response)
+        if total_tok:
+            cost_micros = estimate_cost_usd_micros(scope.model, prompt_tok, completion_tok) or 0
+            _cost_tracker.record(
+                trace_id=scope.trace_id,
+                scope_id=scope.span_id,
+                tokens=total_tok,
+                cost_usd_micros=cost_micros,
+            )
+        return _cost_tracker.context_for(trace_id=scope.trace_id, scope_id=scope.span_id)
+
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        pre_snapshot, principal, identity_claims, identity_roles = self._pre_model_snapshot(request)
-        pre = self.hook.evaluate(snapshot=pre_snapshot, stage="pre", principal=principal)
+        pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
+            self._pre_model_snapshot(request)
+        )
+        pre = self.hook.evaluate(
+            snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
+        )
         if not pre.decision.allowed:
             raise GovernanceDenied(pre.decision)
 
         response = handler(request)
 
+        post_context = self._record_usage(scope, response)
         post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
-        post = self.hook.evaluate(snapshot=post_snapshot, stage="post", principal=principal)
+        post = self.hook.evaluate(
+            snapshot=post_snapshot, stage="post", principal=principal, extra_context=post_context
+        )
         if not post.decision.allowed:
             raise GovernanceDenied(post.decision)
         # post.alter_with: ALTER is not yet supported by this adapter (see
@@ -201,15 +339,22 @@ class ParapetAgentMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        pre_snapshot, principal, identity_claims, identity_roles = self._pre_model_snapshot(request)
-        pre = self.hook.evaluate(snapshot=pre_snapshot, stage="pre", principal=principal)
+        pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
+            self._pre_model_snapshot(request)
+        )
+        pre = self.hook.evaluate(
+            snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
+        )
         if not pre.decision.allowed:
             raise GovernanceDenied(pre.decision)
 
         response = await handler(request)
 
+        post_context = self._record_usage(scope, response)
         post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
-        post = self.hook.evaluate(snapshot=post_snapshot, stage="post", principal=principal)
+        post = self.hook.evaluate(
+            snapshot=post_snapshot, stage="post", principal=principal, extra_context=post_context
+        )
         if not post.decision.allowed:
             raise GovernanceDenied(post.decision)
         return response
@@ -218,7 +363,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
     # tool call -- one Cedar tool_call decision before the tool runs
     # ------------------------------------------------------------------ #
 
-    def _tool_snapshot(self, request: ToolCallRequest) -> tuple[Snapshot, str]:
+    def _tool_snapshot(self, request: ToolCallRequest) -> tuple[Snapshot, str, dict[str, int]]:
         tool_call = request.tool_call
         tool_args = dict(tool_call.get("args") or {})
         # request.tool -- the resolved BaseTool, with a native `.metadata`
@@ -244,15 +389,28 @@ class ParapetAgentMiddleware(AgentMiddleware):
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
         )
-        return snapshot, _effective_principal(self.caller)
+        # COST-TRACK: scope_id is the TRIGGERING model_call's own span id
+        # (whatever wrap_model_call last set -- see the module-level
+        # contextvar comments), so this tool_call accumulates into the
+        # SAME "turn" total as the model_call that requested it. Falls
+        # back to a fresh one-off id only for a tool_call with no
+        # correlated model_call at all (this middleware invoked directly,
+        # or wrap_model_call never fired -- e.g. a resumed/checkpointed
+        # run), same fallback shape as maf.py's own tool_call correlation.
+        trace_id = _current_trace_id.get() or _new_trace_id()
+        span_id = _current_span_id.get() or _new_span_id()
+        cost_context = _cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)
+        return snapshot, _effective_principal(self.caller), cost_context
 
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
-        snapshot, principal = self._tool_snapshot(request)
-        decision = self.hook.evaluate(snapshot=snapshot, stage="pre", principal=principal)
+        snapshot, principal, cost_context = self._tool_snapshot(request)
+        decision = self.hook.evaluate(
+            snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
+        )
         if not decision.decision.allowed:
             _record_tool_denial(decision.decision.reason)
             raise GovernanceDenied(decision.decision)
@@ -263,8 +421,10 @@ class ParapetAgentMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        snapshot, principal = self._tool_snapshot(request)
-        decision = self.hook.evaluate(snapshot=snapshot, stage="pre", principal=principal)
+        snapshot, principal, cost_context = self._tool_snapshot(request)
+        decision = self.hook.evaluate(
+            snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
+        )
         if not decision.decision.allowed:
             _record_tool_denial(decision.decision.reason)
             raise GovernanceDenied(decision.decision)

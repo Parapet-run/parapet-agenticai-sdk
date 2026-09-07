@@ -254,3 +254,97 @@ def test_no_policy_dir_uses_bundled_default_and_still_governs(tmp_path: Path) ->
     agent = _agent("lookup_order", {"order_id": "A1"}, mw)
     result = agent.invoke({"messages": [{"role": "user", "content": "x"}]})
     assert result["messages"][-1].content == "Done."
+
+
+# ── Cumulative cost/token tracking (docs/reference/cost-tracking.md) ────────
+
+
+def _heavy_agent(mw: ParapetAgentMiddleware):
+    """A two-turn tool-calling run whose FIRST model call reports 160
+    tokens of usage -- enough to cross a 100-token budget by the time the
+    SECOND model call's pre-stage decision (or the tool_call in between)
+    evaluates."""
+    model = _FakeModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "lookup_order", "args": {"order_id": "A1"}, "id": "c1"}],
+                    usage_metadata={"input_tokens": 80, "output_tokens": 80, "total_tokens": 160},
+                ),
+                AIMessage(content="Done."),
+            ]
+        )
+    )
+    return create_agent(
+        model, tools=[lookup_order, execute_shell, delete_salesforce_case], middleware=[mw]
+    )
+
+
+def test_trace_cumulative_tokens_denies_a_later_turn_once_over_budget(tmp_path: Path) -> None:
+    """Proves accumulation actually crosses a turn boundary: the FIRST
+    model_call's pre-stage decision must be allowed (nothing spent yet),
+    its own usage recorded after the response comes back, and the SECOND
+    model_call's pre-stage decision (a separate, later wrap_model_call
+    invocation, not nested in the first) must see the running total."""
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("token_budget")\n'
+        'forbid(principal, action == Action::"model_call", resource)\n'
+        "when { context has trace_cumulative_tokens && context.trace_cumulative_tokens > 100 };",
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+    agent = _heavy_agent(mw)
+    with pytest.raises(GovernanceDenied) as exc_info:
+        agent.invoke({"messages": [{"role": "user", "content": "x"}]})
+    assert exc_info.value.decision.effect == "deny"
+
+
+def test_tool_call_sees_span_cumulative_tokens_from_its_triggering_model_call(
+    tmp_path: Path,
+) -> None:
+    """The tool_call this turn triggers must accumulate into the SAME
+    "turn" total as the model_call that requested it (mirrors maf.py's own
+    COST-TRACK-1 correlation) -- span_cumulative_tokens, not
+    trace_cumulative_tokens, since this is a single-turn budget."""
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        '@id("span_budget")\n'
+        'forbid(principal, action == Action::"tool_call", resource)\n'
+        "when { context has span_cumulative_tokens && context.span_cumulative_tokens > 100 };",
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+    agent = _heavy_agent(mw)
+    with pytest.raises(GovernanceDenied) as exc_info:
+        agent.invoke({"messages": [{"role": "user", "content": "x"}]})
+    assert exc_info.value.decision.effect == "deny"
+
+
+def test_new_agent_invoke_starts_a_fresh_trace(tmp_path: Path) -> None:
+    """before_agent must reset the trace scope: a SEPARATE, later
+    agent.invoke() sharing the same middleware instance must not inherit
+    cumulative usage from a previous, unrelated run."""
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("token_budget")\n'
+        'forbid(principal, action == Action::"model_call", resource)\n'
+        "when { context has trace_cumulative_tokens && context.trace_cumulative_tokens > 100 };",
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+
+    heavy_agent = _heavy_agent(mw)
+    with pytest.raises(GovernanceDenied):
+        heavy_agent.invoke({"messages": [{"role": "user", "content": "x"}]})
+
+    light_model = _FakeModel(messages=iter([AIMessage(content="Hi.")]))
+    light_agent = create_agent(light_model, tools=[], middleware=[mw])
+    result = light_agent.invoke({"messages": [{"role": "user", "content": "hello"}]})
+    assert result["messages"][-1].content == "Hi."

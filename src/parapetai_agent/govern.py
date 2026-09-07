@@ -25,12 +25,14 @@ Every method returns the Cedar `Decision`. By default a deny raises
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 import inspect
 import json
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,10 +43,18 @@ from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequir
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import Caller
+from parapetai_agent.policy.cost_tracker import CostTracker
+from parapetai_agent.policy.cost_tracker import new_span_id as _new_span_id
+from parapetai_agent.policy.cost_tracker import new_trace_id as _new_trace_id
 from parapetai_agent.policy.engine import Decision, PolicyEngine
 from parapetai_agent.policy.hooks import GovernanceHook, OnDecision
+from parapetai_agent.policy.pricing import estimate_cost_usd_micros
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.response_judge import JudgeConfig
+from parapetai_agent.vendor_calls import resolve_vendor_call as _resolve_vendor_call
+from parapetai_agent.vendor_calls import (
+    resolve_vendor_call_from_metadata as _resolve_vendor_call_from_metadata,
+)
 
 __all__ = ["Governor", "GovernanceDenied", "GovernanceReviewRequired"]
 
@@ -52,6 +62,28 @@ __all__ = ["Governor", "GovernanceDenied", "GovernanceReviewRequired"]
 # the audit record is content-free (parapetai_agent.policy.hooks.content_free).
 _PREVIEW = 4000
 _PROVIDER = "govern"
+
+# One CostTracker per process -- same module-level-singleton pattern as
+# maf.py/adk.py/langgraph.py's own _cost_tracker; trace_id is globally
+# unique (random hex), so sharing across every Governor instance in this
+# process is safe. See docs/reference/cost-tracking.md.
+_cost_tracker = CostTracker()
+
+# TRACE/SPAN correlation for cost tracking -- see Governor.trace()'s own
+# docstring for why this has to be explicit here (no framework loop of its
+# own to hook a "run started"/"run ended" boundary into, unlike MAF/ADK/
+# LangGraph). contextvars for the same reason maf.py's _current_chat is
+# one: isolated per asyncio task under concurrent callers sharing one
+# Governor. _current_span_id is set by check_input() and deliberately LEFT
+# SET (not reset in a finally) so a later authorize_tool()/check_output()
+# call in the same turn -- called separately, by the embedding loop, not
+# nested inside check_input() -- picks up the same scope.
+_current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "parapetai_agent_govern_current_trace_id", default=None
+)
+_current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "parapetai_agent_govern_current_span_id", default=None
+)
 
 
 class Governor:
@@ -73,10 +105,16 @@ class Governor:
         groundedness: GroundednessConfig | None = None,
         judge: JudgeConfig | None = None,
         on_decision: OnDecision | None = None,
+        vendor_scoped_resources: bool = False,
     ) -> None:
         self._engine = engine
         self._caller = caller or Caller(agent_id="agent")
-        self._hook = GovernanceHook(engine, self._caller, on_decision=on_decision)
+        self._hook = GovernanceHook(
+            engine,
+            self._caller,
+            on_decision=on_decision,
+            vendor_scoped_resources=vendor_scoped_resources,
+        )
         self._content_checks = content_checks
         self._groundedness = groundedness
         self._judge = judge
@@ -102,11 +140,18 @@ class Governor:
         bundle_files: Mapping[str, str] | None = None,
         caller: Caller | None = None,
         on_decision: OnDecision | None = None,
+        vendor_scoped_resources: bool = False,
     ) -> Governor:
         """Load Cedar policy from local files. `bundle_files` optionally supplies
         the content-check / groundedness / judge JSON configs (the same files a
         control-plane bundle carries) to enable the input scanners and output
-        evals; without them, only Cedar authorization runs."""
+        evals; without them, only Cedar authorization runs.
+
+        vendor_scoped_resources (default False): same opt-in, off-by-default
+        flag as maf.build_middleware()/adk.build_plugin()/langgraph.build_middleware()
+        -- see docs/reference/vendor-calls.md. Meaningful here unconditionally
+        (unlike those three), since from_control_plane() below resolves it
+        from the bundle instead and never reads this parameter at all."""
         engine = PolicyEngine(policy_dir, entities_path)
         cc, gr, jd = ContentCheckConfig(), GroundednessConfig(), JudgeConfig()
         if bundle_files:
@@ -121,6 +166,7 @@ class Governor:
             groundedness=gr,
             judge=jd,
             on_decision=on_decision,
+            vendor_scoped_resources=vendor_scoped_resources,
         )
 
     @classmethod
@@ -224,6 +270,15 @@ class Governor:
             groundedness=gr,
             judge=jd,
             on_decision=on_decision,
+            # Control-plane-resolved, once at bootstrap -- same priority
+            # rule as build_middleware()/build_plugin(): a tenant's
+            # console-driven rollout decision is authoritative, so there is
+            # no separate vendor_scoped_resources= parameter on THIS
+            # constructor for a caller to override it with (unlike
+            # from_policy_dir(), which has no bundle to resolve one from at
+            # all). See Bootstrap.vendor_scoped_resources's own docstring
+            # for why this doesn't hot-reload mid-process.
+            vendor_scoped_resources=boot.vendor_scoped_resources,
         )
         governor._bootstrap = boot
         governor._reviews = ReviewClient(
@@ -242,6 +297,46 @@ class Governor:
         if self._bootstrap is not None:
             self._bootstrap.stop(timeout)
             self._bootstrap = None
+
+    # ------------------------------------------------------------------ #
+    # cumulative cost/token tracking scope (see docs/reference/cost-tracking.md)
+    # ------------------------------------------------------------------ #
+    @contextlib.contextmanager
+    def trace(self) -> Iterator[None]:
+        """Marks one cumulative cost/token-tracking TRACE boundary --
+        every check_input()/authorize_tool()/check_output() call made
+        inside this block shares one running total
+        (`context.trace_cumulative_tokens` etc.), dropped the moment the
+        block exits:
+
+            with gov.trace():
+                gov.check_input(prompt)
+                gov.authorize_tool("lookup_order", {"id": "123"})
+                gov.check_output(answer, model="gpt-4o", completion_tokens=42)
+
+        MAF/ADK/LangGraph each have a real "one agent run" boundary their
+        own middleware sees (`before_agent`/`after_agent`, an OTel span, or
+        equivalent) and use it to scope this automatically. `Governor` has
+        no framework loop of its own to hook into (see
+        docs/frameworks/governor.md's Async/streaming section) -- so unlike
+        those three, this has to be explicit.
+
+        Without it, every call is its own one-off trace: cumulative fields
+        are still always populated (never absent from `context`), they
+        just never accumulate past that single call -- the same degrade
+        LangGraph's own adapter falls back to when its `before_agent` hook
+        never fired. Nestable (an inner `with gov.trace():` gets its own
+        trace_id and the outer one resumes on exit), but nesting does NOT
+        merge totals across the two -- they are two independent traces.
+        """
+        token = _current_trace_id.set(_new_trace_id())
+        try:
+            yield
+        finally:
+            trace_id = _current_trace_id.get()
+            if trace_id is not None:
+                _cost_tracker.end_trace(trace_id)
+            _current_trace_id.reset(token)
 
     # ------------------------------------------------------------------ #
     # the three decisions
@@ -277,6 +372,17 @@ class Governor:
             if res.errors:  # a configured scanner could not run -> fail closed
                 return self._deny(self._failure_decision(res.errors), raise_on_deny)
             extra = res.context
+        # COST-TRACK: trace_id is whatever trace() set (a fresh one-off if
+        # that context manager was never entered -- degrades to per-call
+        # granularity, never absent). span_id is fresh per check_input()
+        # call and left SET (not reset) so authorize_tool()/check_output()
+        # calls the embedding loop makes AFTER this returns -- not nested
+        # inside it -- pick up the same turn. Mirrors langgraph.py's
+        # wrap_model_call/_current_span_id exactly.
+        trace_id = _current_trace_id.get() or _new_trace_id()
+        span_id = _new_span_id()
+        _current_span_id.set(span_id)
+        extra = {**extra, **_cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)}
         result = self._hook.evaluate(snapshot=snap, stage="pre", extra_context=extra or None)
         # No args_preview: the "arguments" of a model call are the prompt, and
         # invariant 10 keeps prompt content out of anything the control plane
@@ -293,22 +399,62 @@ class Governor:
         *,
         roles: Sequence[str] | None = None,
         claims: Mapping[str, Any] | None = None,
+        func: Callable[..., Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
         raise_on_deny: bool = True,
     ) -> Decision:
         """Authorize one tool call — by name, arguments, and caller role —
         against Cedar, before it executes. A denied call raises (default) so it
-        never runs."""
+        never runs.
+
+        `func`/`metadata` declare the tool's vendor/CRUD facts, same two
+        paths and same precedence (metadata checked first) `adk.py`/
+        `langgraph.py` use — see docs/reference/vendor-calls.md:
+
+        - `func`: the underlying callable, if it (or a wrapper `.tool()`
+          resolved to it) was decorated with
+          `parapetai_agent.vendor_calls.declare_vendor_call`. `Governor.tool`
+          passes this for you automatically.
+        - `metadata`: a plain dict for a tool you don't own the source of
+          (the same `parapet_vendor_system`/`parapet_resource_type`/
+          `parapet_crud_action` convention ADK's `custom_metadata`/
+          LangChain's `.metadata` use) — the natural path here, since a raw
+          `authorize_tool()` call has no framework tool object to read a
+          native metadata dict off of at all.
+
+        Populating either reaches the SAME `context.vendor_system`/
+        `crud_action` fields, and is subject to the SAME opt-in
+        `vendor_scoped_resources` resource construction, that MAF/ADK/
+        LangGraph already produce — a control-plane connector-catalog
+        match (or a hand-written Cedar policy) that reads those fields
+        needs no special case for "this call came through Governor."
+        """
         claims_d, roles_l = self._identity(claims, roles)
+        args = dict(arguments or {})
+        vendor = _resolve_vendor_call_from_metadata(metadata) or _resolve_vendor_call(func, args)
         snap = Snapshot(
             provider=_PROVIDER,
             endpoint="in-process:govern:tool_call",
             parsed=True,
             tool_name=name,
-            tool_args=dict(arguments or {}),
+            tool_args=args,
             identity_claims=claims_d,
             identity_roles=roles_l,
+            vendor_system=vendor[0] if vendor else None,
+            vendor_operation=vendor[1] if vendor else None,
+            crud_action=vendor[2] if vendor else None,
         )
-        result = self._hook.evaluate(snapshot=snap, stage="pre")
+        # COST-TRACK: scope_id is whatever check_input() last set (the
+        # triggering model_call's own "turn"), so this tool_call
+        # accumulates into the SAME total as the model_call that requested
+        # it -- falls back to a fresh one-off id only when authorize_tool()
+        # is called with no preceding check_input() in this trace at all
+        # (a valid, common pattern -- e.g. a caller that only ever governs
+        # tool calls, per this module's own top-of-file example).
+        trace_id = _current_trace_id.get() or _new_trace_id()
+        span_id = _current_span_id.get() or _new_span_id()
+        cost_context = _cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)
+        result = self._hook.evaluate(snapshot=snap, stage="pre", extra_context=cost_context)
         # Tool arguments ARE previewable: they are what the policy already
         # matched on, and an approver who cannot see which issue is being
         # closed cannot meaningfully approve closing it.
@@ -317,8 +463,8 @@ class Governor:
             raise_on_deny,
             action="tool_call",
             tool_name=name,
-            args=dict(arguments or {}),
-            preview=json.dumps(dict(arguments or {}), sort_keys=True, default=str)[:2000],
+            args=args,
+            preview=json.dumps(args, sort_keys=True, default=str)[:2000],
         )
 
     def check_output(
@@ -329,11 +475,24 @@ class Governor:
         roles: Sequence[str] | None = None,
         claims: Mapping[str, Any] | None = None,
         model: str | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
         raise_on_deny: bool = True,
     ) -> Decision:
         """Post-model eval: score groundedness (against `sources`) and run the
         SLM judge if configured, then a Cedar `post` decision — before the
-        answer is delivered. A scorer that errors fails closed (denies)."""
+        answer is delivered. A scorer that errors fails closed (denies).
+
+        `prompt_tokens`/`completion_tokens` (both default 0, meaning "no
+        usage to report") let the caller feed real usage back into
+        cumulative cost/token tracking — unlike MAF/ADK, `Governor` never
+        sees the model's own response object (only this already-extracted
+        `text`), so it cannot learn token counts on its own; the embedding
+        loop, which DOES hold the real response, has to report them. Cost
+        is estimated the same way MAF/ADK's is, via the SAME
+        `$/1M token` price table (`policy/pricing.py`,
+        `PARAPETAI_MODEL_PRICING`) — the caller reports tokens, not
+        dollars. See docs/reference/cost-tracking.md."""
         claims_d, roles_l = self._identity(claims, roles)
         snap = Snapshot(
             provider=_PROVIDER,
@@ -357,6 +516,20 @@ class Governor:
             extra.update(j.context)
         if errors:  # a scorer could not run -> fail closed
             return self._deny(self._failure_decision(tuple(errors)), raise_on_deny)
+        # COST-TRACK: scope_id is whatever check_input() last set for this
+        # turn (a fresh one-off if check_output() is called standalone).
+        # Recorded BEFORE building extra, same as maf.py's own COST-TRACK-1
+        # ordering, so the post-stage Cedar decision sees the up-to-date
+        # picture including this call's own usage, not the pre-call one.
+        trace_id = _current_trace_id.get() or _new_trace_id()
+        span_id = _current_span_id.get() or _new_span_id()
+        if prompt_tokens or completion_tokens:
+            total_tok = prompt_tokens + completion_tokens
+            cost_micros = estimate_cost_usd_micros(model, prompt_tokens, completion_tokens) or 0
+            _cost_tracker.record(
+                trace_id=trace_id, scope_id=span_id, tokens=total_tok, cost_usd_micros=cost_micros
+            )
+        extra.update(_cost_tracker.context_for(trace_id=trace_id, scope_id=span_id))
         result = self._hook.evaluate(snapshot=snap, stage="post", extra_context=extra or None)
         # Same content rule as check_input: the response is model output, so it
         # is fingerprinted but never previewed into the queue.
@@ -379,6 +552,18 @@ class Governor:
 
             @gov.tool
             def delete_incident(number: str) -> str: ...
+
+        If `f` also carries `@declare_vendor_call` (from
+        `parapetai_agent.vendor_calls`), that's resolved automatically and
+        reaches Cedar as `context.vendor_system`/`crud_action`, same as it
+        would through MAF/ADK/LangGraph — see `authorize_tool()`'s own
+        docstring:
+
+            @gov.tool
+            @declare_vendor_call(VendorCallSpec(
+                vendor_system="salesforce", resource_type="Case", crud_action="delete",
+            ))
+            def delete_salesforce_case(case_id: str) -> str: ...
         """
 
         def deco(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -387,14 +572,14 @@ class Governor:
 
                 @functools.wraps(f)
                 async def awrapper(*args: Any, **kwargs: Any) -> Any:
-                    self.authorize_tool(tool_name, kwargs)
+                    self.authorize_tool(tool_name, kwargs, func=f)
                     return await f(*args, **kwargs)
 
                 return awrapper
 
             @functools.wraps(f)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
-                self.authorize_tool(tool_name, kwargs)
+                self.authorize_tool(tool_name, kwargs, func=f)
                 return f(*args, **kwargs)
 
             return wrapper

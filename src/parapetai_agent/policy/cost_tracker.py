@@ -39,11 +39,28 @@ module implements. Short version:
 
 from __future__ import annotations
 
+import secrets
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 
 from opentelemetry.trace import SpanContext
+
+
+def new_trace_id() -> str:
+    """A fresh id for a CostTracker TRACE scope, for an integration with no
+    real OTel SpanContext to derive one from (langgraph.py, govern.py) --
+    same 32-hex-char shape span_ids() produces from a real 128-bit OTel
+    trace id below, purely so a trace_id string looks the same regardless
+    of which integration produced it; nothing downstream actually requires
+    that width."""
+    return secrets.token_hex(16)
+
+
+def new_span_id() -> str:
+    """Same idea as new_trace_id(), SPAN-scoped: 16-hex-char, matching
+    span_ids()'s 64-bit-derived width."""
+    return secrets.token_hex(8)
 
 
 def span_ids(span_context: SpanContext) -> tuple[str, str] | None:
