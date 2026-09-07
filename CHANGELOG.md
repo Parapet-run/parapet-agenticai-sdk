@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0]
+
+### Added
+- **Declared vendor/CRUD metadata for tool calls.** `parapetai_agent.vendor_calls`:
+  `VendorCallSpec`/`declare_vendor_call`/`resolve_vendor_call` (decorator-based,
+  attaches to the underlying callable) and `resolve_vendor_call_from_metadata`
+  (for ADK's `custom_metadata` / LangChain's `.metadata`). `Snapshot` carries
+  the resolved facts as `vendor_system`/`vendor_operation`/`crud_action`,
+  available to Cedar as `context.crud_action` etc. and never stripped by
+  `content_free()`. Wired into MAF, ADK, and LangGraph.
+- `GovernanceHook(..., vendor_scoped_resources=True)` (default `False`,
+  threaded through `build_middleware()`/`build_plugin()` on all three
+  frameworks): resolves a tool call's Cedar `resource` to
+  `Resource::"<vendor_system>/<vendor_operation>"` instead of
+  `Resource::"<provider>"` when vendor metadata was declared, and to the
+  distinct `Resource::"undeclared"` when it wasn't -- so an unclassified
+  tool never silently inherits whatever a provider-scoped `permit` already
+  allows. Off by default: no existing bundle's resource-matching policies
+  change behavior until this is explicitly turned on.
+
+### Fixed
+- `langgraph.py`'s `_tool_snapshot` read only `request.tool_call` (the raw
+  `{name, args, id}` dict from the model's output), never `request.tool` --
+  so a LangChain tool's own `.metadata` was completely unreachable by any
+  Cedar decision. Now reads `request.tool` too (falls back to the raw dict
+  when a tool isn't registered with the `ToolNode`, unchanged from before).
+- `mode`'s default value was inconsistent across the control-plane client
+  (`"enforce"` in `bootstrap_engine()`, `""` in `run_bundle_poller()`).
+  Both now reference one `control_plane.DEFAULT_MODE` constant.
+
 ## [0.5.0]
 
 ### Added
