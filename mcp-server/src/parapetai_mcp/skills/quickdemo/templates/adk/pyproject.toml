@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Parapet quickdemo: Sales vs HR identity-based tool access, Google ADK"
 requires-python = ">=3.12"
 dependencies = [
-    "parapetai-agent[adk]>=0.3,<1.0",
+    # >=0.10: console defaults to PARAPETAI_CONSOLE_LOG (off) instead of
+    # always-on -- example_governed.py relies on that default, no console=
+    # kwarg passed itself.
+    "parapetai-agent[adk]>=0.10,<1.0",
     "python-dotenv>=1.0",
 ]
 

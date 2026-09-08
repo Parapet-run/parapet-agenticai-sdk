@@ -32,6 +32,7 @@ import contextvars
 import json
 import logging
 import logging.handlers
+import os
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -253,6 +254,38 @@ def _emit_otel_decision(record: Mapping[str, Any], context: Mapping[str, Any]) -
 
 
 _audit_log_configured_dirs: set[str] = set()
+
+
+def resolve_local_output_settings(
+    console: bool | None, local_log_dir: str | Path | None
+) -> tuple[bool, str | Path | None]:
+    """One implementation of the env fallback for the two knobs that
+    control what a governed run prints/writes LOCALLY (never what's
+    shipped to the control plane) -- maf.build_middleware(),
+    adk.build_plugin() and langgraph's own builder each expose an
+    identical console/local_log_dir kwarg pair and would otherwise each
+    hand-roll this resolution, the same drift risk this module's own
+    cedarpy-shape/OpenInference-registry docstrings warn about elsewhere.
+
+    console: bool | None -- an explicit True/False from a caller always
+    wins. None (every builder's own default) falls back to
+    PARAPETAI_CONSOLE_LOG, itself defaulting to false -- so a governed run
+    prints nothing to stdout unless the embedder opts in, either in code
+    or via that env var. This is a DEFAULT CHANGE from earlier SDK
+    versions, where console defaulted to True: a decision stream on stdout
+    by default was the right call for a first `pip install` demo, wrong
+    for anything embedded in a real application's own logging.
+
+    local_log_dir: an explicit path always wins; PARAPETAI_LOCAL_LOG_DIR
+    is the fallback, unset (None) by default -- no file sink at all unless
+    asked for, same as before this function existed."""
+    resolved_console = (
+        console
+        if console is not None
+        else os.environ.get("PARAPETAI_CONSOLE_LOG", "false").strip().lower() == "true"
+    )
+    resolved_local_log_dir = local_log_dir or os.environ.get("PARAPETAI_LOCAL_LOG_DIR") or None
+    return resolved_console, resolved_local_log_dir
 
 
 def configure_rotating_audit_log(

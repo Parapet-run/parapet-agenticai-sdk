@@ -168,6 +168,9 @@ from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
 from parapetai_agent.governance_runtime import record_tool_denial as _record_tool_denial
+from parapetai_agent.governance_runtime import (
+    resolve_local_output_settings as _resolve_local_output_settings,
+)
 from parapetai_agent.governance_runtime import resolve_policy_source as _resolve_policy_source
 from parapetai_agent.governance_runtime import set_oi_attributes as _set_oi_attributes
 from parapetai_agent.governance_runtime import track_tool_denials as track_tool_denials
@@ -880,7 +883,7 @@ def build_plugin(
     local_log_dir: str | Path | None = None,
     persist_pep_key: bool = True,
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
-    console: bool = True,
+    console: bool | None = None,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     trust_session_user_id: bool = False,
     vendor_scoped_resources: bool = False,
@@ -916,6 +919,7 @@ def build_plugin(
     Most callers should use GovernedRunner (below) instead of calling this
     directly, same relationship build_middleware() has to GovernedAgent.
     """
+    console, local_log_dir = _resolve_local_output_settings(console, local_log_dir)
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
 
@@ -1085,7 +1089,7 @@ class GovernedRunner(Runner):
         local_log_dir: str | Path | None = None,
         persist_pep_key: bool = True,
         otel_log_mode: Literal["streaming", "buffered"] = "buffered",
-        console: bool = True,
+        console: bool | None = None,
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
         trust_session_user_id: bool = False,
         vendor_scoped_resources: bool = False,

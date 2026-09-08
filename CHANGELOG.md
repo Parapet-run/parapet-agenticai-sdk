@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0]
+
+### Changed
+- **`console` now defaults to silent, resolved from `PARAPETAI_CONSOLE_LOG`
+  (default `false`), on `maf.build_middleware()`/`GovernedAgent`,
+  `adk.build_plugin()`/`GovernedRunner`, and `langgraph.build_middleware()`.**
+  Previously `console: bool = True` on all five, so a governed run printed
+  a raw structlog/OTel decision stream to stdout unless every embedder
+  remembered `console=False` -- exactly the boilerplate `examples/maf_webapp/`
+  and every quickdemo template had to repeat. An explicit `console=True`/
+  `False` at the call site still wins outright; only the *default* (an
+  omitted kwarg) changed, from a literal `True` to `None`, which now
+  resolves to the env var. **This is a behavior change for any embedder
+  relying on the old default** -- pass `console=True` (or set
+  `PARAPETAI_CONSOLE_LOG=true`) to keep the previous behavior.
+- **`local_log_dir` now also falls back to `PARAPETAI_LOCAL_LOG_DIR`** on
+  the same five entry points, same "explicit always wins, env var only
+  fills an omitted kwarg" rule. Still `None`/off by default when neither
+  is set -- no behavior change there, just one less thing an embedder has
+  to thread through their own env-reading code by hand.
+- Both resolved by one new shared function,
+  `governance_runtime.resolve_local_output_settings()`, rather than each
+  of `maf.py`/`adk.py`/`langgraph.py` hand-rolling its own env fallback (as
+  `PARAPETAI_CONTROL_PLANE_URL`/`PARAPETAI_AGENT_SECRET`/`PARAPETAI_AGENT_ID`
+  already independently do in each file) -- one implementation so the
+  three framework integrations can't drift on what "unset" means for
+  these two.
+
 ## [0.9.0]
 
 ### Added

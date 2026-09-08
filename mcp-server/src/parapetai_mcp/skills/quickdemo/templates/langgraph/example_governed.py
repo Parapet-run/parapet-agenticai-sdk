@@ -227,7 +227,11 @@ def main() -> None:
         policy_dir = None
         persist_policy_dir = _resolve_persist_policy_dir()
 
-    build_kwargs: dict = {"agent_id": agent_id, "console": False}
+    # No console=False here: parapetai-agent>=0.10 defaults console to
+    # PARAPETAI_CONSOLE_LOG (itself defaulting to false), so this demo is
+    # already quiet on stdout by default -- see .env.cloud.example /
+    # .env.local.example to turn the decision stream back on for debugging.
+    build_kwargs: dict = {"agent_id": agent_id}
     if policy_dir is not None:
         build_kwargs["policy_dir"] = policy_dir  # PARAPETAI_MODE=local
     else:

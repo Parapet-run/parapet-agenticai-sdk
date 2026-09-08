@@ -7,7 +7,10 @@ dependencies = [
     # Needs a parapetai-agent release that ships the `langgraph` extra
     # (parapetai_agent.langgraph / ParapetAgentMiddleware) -- if `uv sync`
     # reports no such extra, upgrade parapetai-agent.
-    "parapetai-agent[langgraph]>=0.5,<1.0",
+    # >=0.10: console defaults to PARAPETAI_CONSOLE_LOG (off) instead of
+    # always-on -- example_governed.py relies on that default, no console=
+    # kwarg passed itself.
+    "parapetai-agent[langgraph]>=0.10,<1.0",
     # Not a parapetai-agent[langgraph] dependency itself (that extra only
     # needs the full `langchain` package) -- this demo's mock_model_server.py
     # is an OpenAI-compatible HTTP stand-in, so langchain-openai's ChatOpenAI

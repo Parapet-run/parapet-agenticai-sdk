@@ -229,6 +229,9 @@ from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
 from parapetai_agent.governance_runtime import record_tool_denial as _record_tool_denial
+from parapetai_agent.governance_runtime import (
+    resolve_local_output_settings as _resolve_local_output_settings,
+)
 from parapetai_agent.governance_runtime import resolve_policy_source as _resolve_policy_source
 from parapetai_agent.governance_runtime import set_oi_attributes as _set_oi_attributes
 from parapetai_agent.governance_runtime import track_tool_denials as track_tool_denials
@@ -1203,7 +1206,7 @@ def build_middleware(
     local_log_dir: str | Path | None = None,
     persist_pep_key: bool = True,
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
-    console: bool = True,
+    console: bool | None = None,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     vendor_scoped_resources: bool = False,
 ) -> tuple[ParapetChatMiddleware, ParapetFunctionMiddleware]:
@@ -1258,17 +1261,26 @@ def build_middleware(
     auto-configured (local_log_dir's file sink is unaffected either
     way).
 
-    console (default True) governs BOTH console outputs uniformly --
+    console (default None) governs BOTH console outputs uniformly --
     local_log_dir's own stream_handler (see configure_rotating_audit_log()'s
     own console= param) AND the auto-wired configure_otel() call's own
-    console= above. False suppresses both: no structlog JSON lines, no
-    raw OTel span/LogRecord dump, printed to stdout -- the file sink
-    (local_log_dir) and the shipped-to-control-plane telemetry (OTel,
-    once configured) are UNAFFECTED either way; this only controls what
-    prints locally, for a CLI example whose own printed output
-    (`print(f"Agent: {result}")`) shouldn't be interleaved with a JSON
-    decision stream. See examples/maf_sample_01/'s own module docstring
-    for exactly that case.
+    console= above. None (the default) resolves to the PARAPETAI_CONSOLE_LOG
+    env var, itself defaulting to false -- so a governed run prints NOTHING
+    to stdout unless explicitly asked for, either console=True here or that
+    env var set to true. An explicit True/False always wins over the env
+    var. Either way the file sink (local_log_dir) and the shipped-to-
+    control-plane telemetry (OTel, once configured) are UNAFFECTED; this
+    only controls what prints locally. See resolve_local_output_settings()
+    (governance_runtime.py) for the one shared implementation adk.py and
+    langgraph.py's builders also use, and local_log_dir's own paragraph
+    above for its PARAPETAI_LOCAL_LOG_DIR fallback, resolved the same way.
+
+    Before this default flipped, a governed run printed a raw JSON
+    decision stream to stdout unless every embedder remembered
+    console=False -- exactly the boilerplate examples/maf_webapp/ and every
+    quickdemo template had to repeat. Silence-by-default plus one env var
+    to turn it back on for local debugging removes that repetition instead
+    of asking each caller to keep rediscovering it.
 
     `agent_id`/`tenant` play the role resolve_from_path() plays for HTTP
     traffic, but there is no path to parse in-process: identity here is
@@ -1403,6 +1415,7 @@ def build_middleware(
     hardcodes here. Only meaningful as the actual value with no control
     plane configured at all.
     """
+    console, local_log_dir = _resolve_local_output_settings(console, local_log_dir)
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
 
@@ -1589,15 +1602,15 @@ class GovernedAgent(Agent):
     explicit, earlier configure_otel() call, which this auto-wiring
     detects and steps aside for.
 
-    console (default True) governs both console outputs uniformly --
+    console (default None) governs both console outputs uniformly --
     local_log_dir's own stream to stdout AND the auto-wired
-    configure_otel() call's own console output -- pass False for a CLI
-    script whose own printed output shouldn't be interleaved with a raw
-    JSON decision/telemetry stream; see build_middleware()'s own
-    docstring for the full story. The file sink (local_log_dir) and
-    telemetry actually shipped to a control plane (once OTel is
-    configured) are UNAFFECTED either way -- this only controls what
-    prints locally.
+    configure_otel() call's own console output. None resolves to
+    PARAPETAI_CONSOLE_LOG (default false), so nothing prints locally
+    unless you pass console=True here or set that env var -- see
+    build_middleware()'s own docstring for the full story. The file sink
+    (local_log_dir) and telemetry actually shipped to a control plane
+    (once OTel is configured) are UNAFFECTED either way -- this only
+    controls what prints locally.
 
     vendor_scoped_resources (default False) -- passed straight through to
     build_middleware(); see its own docstring. Was NOT exposed here until
@@ -1621,7 +1634,7 @@ class GovernedAgent(Agent):
         local_log_dir: str | Path | None = None,
         persist_pep_key: bool = True,
         otel_log_mode: Literal["streaming", "buffered"] = "buffered",
-        console: bool = True,
+        console: bool | None = None,
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
         vendor_scoped_resources: bool = False,
         **kwargs: Any,

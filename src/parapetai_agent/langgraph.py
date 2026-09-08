@@ -80,6 +80,9 @@ from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
 from parapetai_agent.governance_runtime import record_tool_denial as _record_tool_denial
+from parapetai_agent.governance_runtime import (
+    resolve_local_output_settings as _resolve_local_output_settings,
+)
 from parapetai_agent.governance_runtime import resolve_policy_source as _resolve_policy_source
 from parapetai_agent.governance_runtime import track_tool_denials as track_tool_denials
 from parapetai_agent.identity import ANONYMOUS, Caller
@@ -472,7 +475,7 @@ def build_middleware(
     local_log_dir: str | Path | None = None,
     persist_pep_key: bool = True,
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
-    console: bool = True,
+    console: bool | None = None,
     vendor_scoped_resources: bool = False,
 ) -> ParapetAgentMiddleware:
     """One PolicyEngine, one Caller, one ParapetAgentMiddleware -- the
@@ -499,6 +502,7 @@ def build_middleware(
     vendor_scoped_resources: see maf.build_middleware()'s own docstring --
     same opt-in, off-by-default flag, same reason (auth-integrations.md
     §3/§8 Q2)."""
+    console, local_log_dir = _resolve_local_output_settings(console, local_log_dir)
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
 

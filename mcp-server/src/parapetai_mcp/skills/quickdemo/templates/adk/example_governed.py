@@ -155,7 +155,11 @@ async def _run_one(
 
     from parapetai_agent.adk import GovernedRunner, governed_identity
 
-    governed_kwargs: dict = {"console": False}
+    # No console=False here: parapetai-agent>=0.10 defaults console to
+    # PARAPETAI_CONSOLE_LOG (itself defaulting to false), so this demo is
+    # already quiet on stdout by default -- see .env.cloud.example /
+    # .env.local.example to turn the decision stream back on for debugging.
+    governed_kwargs: dict = {}
     if policy_dir is not None:
         governed_kwargs["policy_dir"] = policy_dir  # PARAPETAI_MODE=local
     else:

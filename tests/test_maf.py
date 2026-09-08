@@ -25,6 +25,7 @@ Two testing strategies, deliberately kept separate:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import shutil
 from pathlib import Path
@@ -56,6 +57,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from azure.identity import AzureCliCredential
 from httpx import Response
 
+from parapetai_agent.governance_runtime import resolve_local_output_settings
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.maf import (
     GovernedAgent,
@@ -2572,6 +2574,7 @@ class TestOtelAutoWiring:
             agent_id="otel-auto-4",
             control_plane_url="https://cp.example",
             agent_secret="the-secret",  # noqa: S106 -- test fixture, not a real credential
+            console=True,  # exercising log_mode's own default, not console's
         )
         reset_middleware_registry()  # see the first test's own comment on why
         tp = gr_module._otel_tracer_provider
@@ -2642,9 +2645,9 @@ class TestLocalLogDir:
         pkg_logger = logging.getLogger("parapetai_agent")
         before = len(pkg_logger.handlers)
 
-        build_middleware(agent_id="log-dir-test-2a", local_log_dir=tmp_path)
+        build_middleware(agent_id="log-dir-test-2a", local_log_dir=tmp_path, console=True)
         after_first = len(pkg_logger.handlers)
-        build_middleware(agent_id="log-dir-test-2b", local_log_dir=tmp_path)
+        build_middleware(agent_id="log-dir-test-2b", local_log_dir=tmp_path, console=True)
         after_second = len(pkg_logger.handlers)
 
         assert after_first == before + 2  # one file handler, one stream handler
@@ -2674,6 +2677,69 @@ class TestLocalLogDir:
         path1 = configure_rotating_audit_log(tmp_path)
         path2 = configure_rotating_audit_log(tmp_path)
         assert path1 == path2 == tmp_path / "parapetai-decisions.jsonl"
+
+
+class TestResolveLocalOutputSettings:
+    """governance_runtime.resolve_local_output_settings() -- the one shared
+    implementation of PARAPETAI_CONSOLE_LOG/PARAPETAI_LOCAL_LOG_DIR that
+    maf.build_middleware(), adk.build_plugin() and langgraph.build_middleware()
+    all call instead of each hand-rolling this. console=None used to mean
+    "default True" (a governed run printed a JSON decision stream to stdout
+    unless every embedder remembered console=False); it now means "resolve
+    PARAPETAI_CONSOLE_LOG, itself defaulting to false" -- silence unless
+    asked for, in code or via the env var."""
+
+    def test_console_none_with_no_env_var_resolves_to_false(self, monkeypatch) -> None:
+        monkeypatch.delenv("PARAPETAI_CONSOLE_LOG", raising=False)
+        console, _ = resolve_local_output_settings(None, None)
+        assert console is False
+
+    def test_console_none_reads_the_env_var_true(self, monkeypatch) -> None:
+        monkeypatch.setenv("PARAPETAI_CONSOLE_LOG", "true")
+        console, _ = resolve_local_output_settings(None, None)
+        assert console is True
+
+    def test_console_env_var_is_case_insensitive(self, monkeypatch) -> None:
+        monkeypatch.setenv("PARAPETAI_CONSOLE_LOG", "True")
+        console, _ = resolve_local_output_settings(None, None)
+        assert console is True
+
+    def test_explicit_console_value_wins_over_the_env_var(self, monkeypatch) -> None:
+        monkeypatch.setenv("PARAPETAI_CONSOLE_LOG", "true")
+        console, _ = resolve_local_output_settings(False, None)
+        assert console is False
+
+    def test_local_log_dir_none_falls_back_to_the_env_var(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("PARAPETAI_LOCAL_LOG_DIR", str(tmp_path))
+        _, local_log_dir = resolve_local_output_settings(None, None)
+        assert local_log_dir == str(tmp_path)
+
+    def test_explicit_local_log_dir_wins_over_the_env_var(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("PARAPETAI_LOCAL_LOG_DIR", str(tmp_path / "from-env"))
+        explicit = tmp_path / "from-caller"
+        _, local_log_dir = resolve_local_output_settings(None, explicit)
+        assert local_log_dir == explicit
+
+    def test_neither_set_means_no_file_sink(self, monkeypatch) -> None:
+        monkeypatch.delenv("PARAPETAI_LOCAL_LOG_DIR", raising=False)
+        _, local_log_dir = resolve_local_output_settings(None, None)
+        assert local_log_dir is None
+
+    def test_build_middleware_defaults_to_no_console_output(self, monkeypatch) -> None:
+        # No control plane, no local_log_dir -- console has nothing to
+        # gate here except structlog's own root logger propagation, but
+        # this confirms build_middleware() actually calls through to
+        # resolve_local_output_settings() rather than keeping its own
+        # separate `console: bool = True` default.
+        monkeypatch.delenv("PARAPETAI_CONSOLE_LOG", raising=False)
+        import parapetai_agent.maf as maf_module
+
+        sig = inspect.signature(maf_module.build_middleware)
+        assert sig.parameters["console"].default is None
 
 
 class TestIdentityFromAzureCredential:

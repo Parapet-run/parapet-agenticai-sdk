@@ -171,14 +171,16 @@ and write it into the target directory, unchanged, **except**:
   | `PARAPETAI_ACCOUNT_ID` | `account_id` from `parapet_whoami` (step 2) |
   | `PARAPETAI_CONTROL_PLANE_URL` | the control plane URL used in step 2 |
 
-  Leave `OPENAI_API_KEY` (MAF/LangGraph) / `GOOGLE_API_KEY` (ADK) and
-  `PARAPETAI_PERSIST_POLICY_DIR` exactly as `.env.cloud.example` has them —
-  the mock model is the default and needs no key, and the persisted-bundle
-  cache is on by default so the user can diff it against
-  `./policies/40-org.cedar` if a decision ever looks wrong. Never write a
-  real key into `.env`/`.env.cloud` on the user's behalf; if they want a
-  real model, tell them which line to edit and let them paste their own
-  key in.
+  Leave `OPENAI_API_KEY` (MAF/LangGraph) / `GOOGLE_API_KEY` (ADK),
+  `PARAPETAI_PERSIST_POLICY_DIR`, and `PARAPETAI_CONSOLE_LOG`/
+  `PARAPETAI_LOCAL_LOG_DIR` exactly as `.env.cloud.example` has them (the
+  latter two commented out) — the mock model is the default and needs no
+  key, the persisted-bundle cache is on by default so the user can diff it
+  against `./policies/40-org.cedar` if a decision ever looks wrong, and the
+  demo is silent on stdout by default (parapetai-agent>=0.10) unless the
+  user uncomments one of those two to debug a policy. Never write a real
+  key into `.env`/`.env.cloud` on the user's behalf; if they want a real
+  model, tell them which line to edit and let them paste their own key in.
 - `.env.local`: copied from `.env.local.example` completely unchanged — it
   needs no substitutions (local mode never talks to the control plane).
 - `./policies/`: `00-base.cedar` + `40-org.cedar` (both unchanged) plus
