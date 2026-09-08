@@ -51,13 +51,15 @@ sending anything anywhere, and `parapet_audit_codebase` only ever reads
 your source and writes one report file (`.parapet/audit/report.md` by
 default) — actually instrumenting flagged code is a separate, explicit
 step (the `parapet-audit-fix` skill, driven by Claude Code's own file
-tools, not this server). Six packaged skills tell Claude Code how to use
+tools, not this server). Seven packaged skills tell Claude Code how to use
 these tools and where to write the resulting config — `parapet-maf` for
-a Microsoft Agent Framework project, `parapet-adk` for a Google ADK one
-(the two frameworks put governance in different places, so the
-instrumentation steps genuinely differ; Claude Code picks whichever
-matches your project), `parapet-quickdemo` for generating a runnable
-governed-vs-ungoverned example from scratch in a new or empty project,
+a Microsoft Agent Framework project, `parapet-adk` for a Google ADK one,
+`parapet-langgraph` for a LangGraph/LangChain one (the frameworks put
+governance in different places, so the instrumentation steps genuinely
+differ; Claude Code picks whichever matches your project),
+`parapet-quickdemo` for generating a runnable governed-vs-ungoverned
+example from scratch in a new or empty project (templates for all three
+frameworks),
 `parapet-install-prereqs` for detecting and (with your per-step
 approval) installing Python/pipx/uv when one of the others needs them,
 and `parapet-audit` / `parapet-audit-fix` for scanning an *existing*

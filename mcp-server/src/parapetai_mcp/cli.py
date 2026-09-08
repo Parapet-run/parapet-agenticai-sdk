@@ -4,21 +4,22 @@ serve  -- run the MCP server over stdio (what an MCP client, e.g.
           Claude Code via `claude mcp add`, actually launches).
 init   -- one-time setup in a target project: copies every packaged
           skill's full directory tree -- parapet-maf/, parapet-adk/,
-          parapet-quickdemo/ (the last one also carries a templates/
-          subdirectory the skill reads from at generation time, unlike
-          the others which are a single SKILL.md), parapet-install-
-          prereqs/, parapet-audit/, parapet-audit-fix/ -- into
-          .claude/skills/, and prints the `claude mcp add` line to wire
-          this server in. Does NOT touch any file outside
-          .claude/skills/ -- instrumenting the project's own code is the
-          calling agent's job, guided by whichever skill actually
-          matches the project (agent_framework vs google.adk), not this
-          command's. All are installed unconditionally rather than this
-          command trying to detect which framework the target project
-          uses -- that detection belongs to the calling agent, which can
-          actually read the project's code; this command can't reliably
-          guess it from a bare directory path alone, and a wrong guess
-          would silently install only the wrong skill.
+          parapet-langgraph/, parapet-quickdemo/ (the last one also
+          carries a templates/ subdirectory the skill reads from at
+          generation time, unlike the others which are a single
+          SKILL.md), parapet-install-prereqs/, parapet-audit/,
+          parapet-audit-fix/ -- into .claude/skills/, and prints the
+          `claude mcp add` line to wire this server in. Does NOT touch
+          any file outside .claude/skills/ -- instrumenting the
+          project's own code is the calling agent's job, guided by
+          whichever skill actually matches the project (agent_framework
+          vs google.adk vs langchain.agents), not this command's. All
+          are installed unconditionally rather than this command trying
+          to detect which framework the target project uses -- that
+          detection belongs to the calling agent, which can actually
+          read the project's code; this command can't reliably guess it
+          from a bare directory path alone, and a wrong guess would
+          silently install only the wrong skill.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import shutil
 import sys
 from pathlib import Path
 
-_SKILLS = ("maf", "adk", "quickdemo", "install-prereqs", "audit", "audit-fix")
+_SKILLS = ("maf", "adk", "langgraph", "quickdemo", "install-prereqs", "audit", "audit-fix")
 
 
 def _cmd_serve(_args: argparse.Namespace) -> None:
@@ -52,10 +53,12 @@ def _cmd_init(args: argparse.Namespace) -> None:
         print(f"Installed SKILL.md to {dest}")
     print()
     print(
-        "Six skills installed -- parapet-maf (Microsoft Agent Framework) and"
-        " parapet-adk (Google ADK) each retrofit an EXISTING project using that"
-        " framework; parapet-quickdemo generates a new, runnable identity-based"
-        " governance demo from nothing; parapet-install-prereqs detects and"
+        "Seven skills installed -- parapet-maf (Microsoft Agent Framework),"
+        " parapet-adk (Google ADK), and parapet-langgraph (LangGraph/LangChain)"
+        " each retrofit an EXISTING project using that framework;"
+        " parapet-quickdemo generates a new, runnable identity-based"
+        " governance demo from nothing (templates for all three frameworks);"
+        " parapet-install-prereqs detects and"
         " (with your per-step approval) installs Python/pipx/uv if any of the"
         " others need them; parapet-audit runs a read-only static scan of an"
         " existing codebase for ungoverned model/tool calls, scored"

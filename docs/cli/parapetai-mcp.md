@@ -37,8 +37,8 @@ claude mcp add parapet -e PARAPETAI_CONTROL_PLANE_URL=https://app.parapet.run --
 ```
 
 - `init [project_dir]` (default `.`) copies every packaged skill —
-  `parapet-maf`, `parapet-adk`, `parapet-quickdemo`, `parapet-install-prereqs`,
-  `parapet-audit`, `parapet-audit-fix`
+  `parapet-maf`, `parapet-adk`, `parapet-langgraph`, `parapet-quickdemo`,
+  `parapet-install-prereqs`, `parapet-audit`, `parapet-audit-fix`
   — into `<project_dir>/.claude/skills/parapet-<name>/`. It never touches
   anything outside `.claude/skills/`; it does not instrument your project's
   code itself. That's what the skills themselves do once invoked.

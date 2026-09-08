@@ -1,6 +1,6 @@
 ---
 name: parapet-maf
-description: Use when the user asks to govern a Microsoft Agent Framework (agent_framework) agent with Parapet, add Parapet to a project that already uses agent_framework, provision a Parapet agent for a MAF project, or wire up Parapet/parapetai-agent[maf] env vars. Requires the parapet MCP server (parapetai-mcp) to be connected. For a Google ADK (google-adk) project, use the parapet-adk skill instead — the instrumentation procedure is genuinely different, not just a naming difference.
+description: Use when the user asks to govern a Microsoft Agent Framework (agent_framework) agent with Parapet, add Parapet to a project that already uses agent_framework, provision a Parapet agent for a MAF project, or wire up Parapet/parapetai-agent[maf] env vars. Requires the parapet MCP server (parapetai-mcp) to be connected. For a Google ADK (google-adk) project use the parapet-adk skill instead, and for LangGraph/LangChain (langchain.agents.create_agent) use parapet-langgraph — all three instrumentation procedures are genuinely different, not just naming differences.
 ---
 
 # Parapet + Microsoft Agent Framework: provision + instrument
@@ -12,10 +12,11 @@ codebase to route through it. The tools only talk to the control plane —
 the steps below.
 
 If the target project uses Google ADK (`google-adk`) instead — check for
-`from google.adk...`/`import google.adk` before assuming this is the right
-skill — use the **parapet-adk** skill instead. The two frameworks put
-governance in genuinely different places (see step 4 below), so applying
-this skill's instructions to an ADK project, or vice versa, will not work.
+`from google.adk...`/`import google.adk` — use the **parapet-adk** skill. If
+it uses LangGraph/LangChain (`langchain.agents.create_agent`), use
+**parapet-langgraph**. All three frameworks put governance in genuinely
+different places (see step 4 below), so applying this skill's instructions
+to an ADK or LangGraph project, or vice versa, will not work.
 
 ## 1. Check auth
 

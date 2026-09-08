@@ -61,9 +61,10 @@ Then, in Claude Code:
   small, runnable, identity-based governance project from scratch (Google
   ADK, Microsoft Agent Framework, or LangGraph/LangChain — your choice),
   against a real control plane you can click into.
-- **"Add Parapet to my agent"** (in an existing `agent_framework` or
-  `google.adk` project) → the `parapet-maf` / `parapet-adk` skill
-  provisions an agent and instruments your existing code.
+- **"Add Parapet to my agent"** (in an existing `agent_framework`,
+  `google.adk`, or `langchain.agents`/LangGraph project) → the
+  `parapet-maf` / `parapet-adk` / `parapet-langgraph` skill provisions an
+  agent and instruments your existing code.
 - **"Audit my codebase for governance risks"** → the `parapet-audit` skill
   runs a local, read-only static scan (no control-plane call) for
   ungoverned model/tool calls, scored high/medium/low; `parapet-audit-fix`

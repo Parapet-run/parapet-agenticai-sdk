@@ -1,8 +1,8 @@
 [project]
 name = "parapetai-mcp"
-version = "0.6.0"
+version = "0.7.0"
 requires-python = ">=3.12"
-description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships six packaged skills: parapet-maf/parapet-adk (retrofit an existing project per framework), parapet-quickdemo (generate a demo from nothing), parapet-install-prereqs (install Python/pipx/uv), and parapet-audit/parapet-audit-fix (scan for ungoverned model/tool calls, then wrap them in GovernedAgent/GovernedRunner)."
+description = "MCP server for Claude Code (and other MCP clients): device-code login to a Parapet control plane, provisioning agents, and pulling the exact quickstart config a codebase needs -- ships seven packaged skills: parapet-maf/parapet-adk/parapet-langgraph (retrofit an existing project per framework), parapet-quickdemo (generate a demo from nothing), parapet-install-prereqs (install Python/pipx/uv), and parapet-audit/parapet-audit-fix (scan for ungoverned model/tool calls, then wrap them in GovernedAgent/GovernedRunner)."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -41,6 +41,7 @@ packages = ["src/parapetai_mcp"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/parapetai_mcp/skills/maf/SKILL.md" = "parapetai_mcp/skills/maf/SKILL.md"
 "src/parapetai_mcp/skills/adk/SKILL.md" = "parapetai_mcp/skills/adk/SKILL.md"
+"src/parapetai_mcp/skills/langgraph/SKILL.md" = "parapetai_mcp/skills/langgraph/SKILL.md"
 "src/parapetai_mcp/skills/quickdemo/SKILL.md" = "parapetai_mcp/skills/quickdemo/SKILL.md"
 "src/parapetai_mcp/skills/quickdemo/templates/maf/README.md" = "parapetai_mcp/skills/quickdemo/templates/maf/README.md"
 "src/parapetai_mcp/skills/quickdemo/templates/maf/pyproject.toml" = "parapetai_mcp/skills/quickdemo/templates/maf/pyproject.toml"

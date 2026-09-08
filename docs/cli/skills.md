@@ -1,6 +1,6 @@
 # Skills
 
-`parapetai-mcp init` installs six Claude Code skills into
+`parapetai-mcp init` installs seven Claude Code skills into
 `.claude/skills/`. Each is a `SKILL.md` that tells an agent (Claude Code,
 or any other MCP client that reads skills) exactly which `parapet_*`
 [tools](mcp-tools.md) to call, in what order, and what never to do — they
@@ -20,14 +20,29 @@ instruments the codebase — swapping in `GovernedAgent`/`build_middleware()`
 and wiring the resulting `agent_id`/`agent_secret`/`control_plane_url`
 into the project's env config.
 
-For a Google ADK project, use `parapet-adk` instead — the instrumentation
-procedure is genuinely different, not just a naming difference.
+For a Google ADK project use `parapet-adk` instead, and for a LangGraph/
+LangChain (`langchain.agents.create_agent`) project use `parapet-langgraph`
+— the instrumentation procedure is genuinely different for each, not just a
+naming difference.
 
 ## `parapet-adk`
 
 Mirror of `parapet-maf` for an existing **Google ADK** (`google.adk`)
 codebase: checks for `google.adk` imports first, then provisions and
 instruments with `GovernedRunner`/`build_plugin()`.
+
+## `parapet-langgraph`
+
+Mirror of `parapet-maf`/`parapet-adk` for an existing **LangGraph/
+LangChain** (`langchain.agents.create_agent`) codebase: checks for
+`create_agent`/`create_react_agent` usage first, then provisions and
+instruments with `build_middleware()` registered via `create_agent(...,
+middleware=[...])` — there is no wrapper class here the way MAF has
+`GovernedAgent`/ADK has `GovernedRunner`. Coverage is per-`create_agent`
+call site, same as `parapet-maf`'s per-construction-site model, not
+`parapet-adk`'s single-Runner model. `parapet_get_quickstart` does not yet
+return LangGraph-specific install/model fields — see the skill's own step 3
+for what to use instead.
 
 ## `parapet-quickdemo`
 
@@ -45,9 +60,9 @@ fully local mode (`PARAPETAI_MODE=local`, no control plane at all) for
 fast policy iteration; see the generated project's own README for the
 toggle.
 
-Distinct from `parapet-adk`/`parapet-maf`, which retrofit an existing
-project — this one creates a new one from nothing, in a directory you
-name.
+Distinct from `parapet-maf`/`parapet-adk`/`parapet-langgraph`, which
+retrofit an existing project — this one creates a new one from nothing, in
+a directory you name (templates exist for all three frameworks).
 
 ## `parapet-install-prereqs`
 
@@ -102,14 +117,17 @@ graph TD
     C["user: build me a demo"] --> D[parapet-quickdemo]
     E["user: govern my MAF agent"] --> F[parapet-maf]
     G["user: govern my ADK agent"] --> H[parapet-adk]
+    S["user: govern my LangGraph agent"] --> T[parapet-langgraph]
     N["user: audit my codebase"] --> O[parapet-audit]
     D --> I[parapet_check_prerequisites]
     F --> I
     H --> I
+    T --> I
     I -->|missing| J[parapet-install-prereqs]
     D --> K["parapet_login_start / parapet_login_wait / parapet_whoami"]
     F --> K
     H --> K
+    T --> K
     K --> L[parapet_provision_agent]
     L --> M["parapet_push_policy_file (quickdemo only)"]
     O --> P[parapet_audit_codebase]
