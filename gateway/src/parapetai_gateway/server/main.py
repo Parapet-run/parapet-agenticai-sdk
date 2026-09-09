@@ -128,30 +128,6 @@ def main() -> None:
     engine = PolicyEngine(settings.policy_dir, settings.entities_path)
     threading.Thread(target=_watch, args=(engine,), daemon=True, name="policy-watch").start()
 
-    if control_plane_configured:
-        threading.Thread(
-            target=run_bundle_poller,
-            args=(args.control_plane_url, args.agent_secret, settings.policy_dir),
-            kwargs={
-                "interval_s": settings.bundle_poll_interval_s,
-                "engine": engine,
-                "pep_id": args.pep_id,
-                "version": _installed_version(),
-                "mode": settings.mode,
-                "private_key": private_key,
-                "key_path": key_path,
-            },
-            daemon=True,
-            name="bundle-poll",
-        ).start()
-        log.info(
-            "bundle_poller_started",
-            agent_id=args.agent_id,
-            pep_id=args.pep_id,
-            control_plane_url=args.control_plane_url,
-            interval_s=settings.bundle_poll_interval_s,
-        )
-
     # A held call can only be escalated where there is a queue to escalate to.
     # None without a control plane, which keeps the no-control-plane gateway
     # behaving exactly as it did before approvals existed.
@@ -167,9 +143,46 @@ def main() -> None:
         else None
     )
 
+    # Built before the bundle-poll thread starts (moved ahead of it,
+    # unlike before Phase B): app.state.vsp_budget must exist so its
+    # update_from_bundle_meta can be wired as the poller's on_bundle_meta
+    # callback below -- auth-integrations.md §10.16 Phase B.
+    app = create_app(engine, reviews)
+
+    if control_plane_configured:
+        threading.Thread(
+            target=run_bundle_poller,
+            args=(args.control_plane_url, args.agent_secret, settings.policy_dir),
+            kwargs={
+                "interval_s": settings.bundle_poll_interval_s,
+                "engine": engine,
+                "pep_id": args.pep_id,
+                "version": _installed_version(),
+                "mode": settings.mode,
+                "private_key": private_key,
+                "key_path": key_path,
+                # auth-integrations.md §10.3/§10.17: every poll cycle's
+                # full bundle response feeds the same server-controlled
+                # saturation signal the in-process SDK already honors
+                # (observation.CollectionBudget.update_from_bundle_meta),
+                # so a gateway-fronted MCP fleet gets the identical
+                # collect-until-N-then-stop behavior, not a separate one.
+                "on_bundle_meta": app.state.vsp_budget.update_from_bundle_meta,
+            },
+            daemon=True,
+            name="bundle-poll",
+        ).start()
+        log.info(
+            "bundle_poller_started",
+            agent_id=args.agent_id,
+            pep_id=args.pep_id,
+            control_plane_url=args.control_plane_url,
+            interval_s=settings.bundle_poll_interval_s,
+        )
+
     log.info("gateway_starting", mode=settings.mode, port=settings.port, **engine.status)
     uvicorn.run(
-        create_app(engine, reviews),
+        app,
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level,

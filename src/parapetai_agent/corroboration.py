@@ -97,9 +97,11 @@ class _Candidate:
     library: str  # human-readable, for the summary log only
 
 
-# Deliberately HTTP/gRPC transports only -- see this module's own
-# docstring for why the database instrumentors opentelemetry-python-contrib
-# also ships (-psycopg2/-pymongo/-redis/-sqlalchemy) are out of scope here.
+# HTTP/gRPC transports. See enable_db_corroboration() below for the
+# database drivers -- kept as a SEPARATE candidate list and a separate
+# enable/disable pair, not folded in here, so a caller that already
+# depends on enable_http_corroboration() covering only these five doesn't
+# silently start tracing their database queries too.
 _CANDIDATES: tuple[_Candidate, ...] = (
     _Candidate("opentelemetry.instrumentation.httpx", "HTTPXClientInstrumentor", "httpx"),
     _Candidate("opentelemetry.instrumentation.requests", "RequestsInstrumentor", "requests"),
@@ -110,7 +112,24 @@ _CANDIDATES: tuple[_Candidate, ...] = (
     _Candidate("opentelemetry.instrumentation.grpc", "GrpcInstrumentorClient", "grpc"),
 )
 
+# auth-integrations.md §10.7: closes the "database" cell of the
+# framework/protocol coverage matrix. Previously excluded (see the
+# module's own git history) on the grounds that observing a tool's own
+# datastore was "a different, not yet designed question" from declared-vs-
+# observed drift -- §10 designed that question and answered it: a DB call
+# a tool makes is exactly as much a candidate VendorScopePermission
+# observation as an HTTP call is, same as the other four. Kept as its own
+# candidate list/enable pair rather than merged into _CANDIDATES -- see
+# that tuple's own comment for why.
+_DB_CANDIDATES: tuple[_Candidate, ...] = (
+    _Candidate("opentelemetry.instrumentation.psycopg2", "Psycopg2Instrumentor", "psycopg2"),
+    _Candidate("opentelemetry.instrumentation.pymongo", "PymongoInstrumentor", "pymongo"),
+    _Candidate("opentelemetry.instrumentation.redis", "RedisInstrumentor", "redis"),
+    _Candidate("opentelemetry.instrumentation.sqlalchemy", "SQLAlchemyInstrumentor", "sqlalchemy"),
+)
+
 _enabled = False
+_db_enabled = False
 
 
 def http_corroboration_enabled() -> bool:
@@ -187,6 +206,57 @@ def disable_http_corroboration() -> None:
         if instrumentor.is_instrumented_by_opentelemetry:
             instrumentor.uninstrument()
     _enabled = False
+
+
+def db_corroboration_enabled() -> bool:
+    """Same contract as http_corroboration_enabled(), for the database
+    candidates (auth-integrations.md §10.7) -- a separate flag, not folded
+    into _enabled, since the two are independently toggleable."""
+    return _db_enabled
+
+
+def enable_db_corroboration() -> dict[str, bool]:
+    """enable_http_corroboration()'s exact counterpart for
+    psycopg2/pymongo/redis/sqlalchemy -- same idempotency guarantee (safe
+    to call more than once), same per-library True/False result shape,
+    same ERROR-log suppression for the common "target library not
+    installed" case. Deliberately a separate function, not an
+    enable_http_corroboration() parameter -- see _DB_CANDIDATES' own
+    comment for why silently expanding what "http corroboration" means
+    would be a real surprise for an existing caller."""
+    global _db_enabled
+    result: dict[str, bool] = {}
+    otel_logger = logging.getLogger("opentelemetry.instrumentation.instrumentor")
+    previous_level = otel_logger.level
+    otel_logger.setLevel(logging.CRITICAL)
+    try:
+        for candidate in _DB_CANDIDATES:
+            result[candidate.library] = _try_instrument(candidate)
+    finally:
+        otel_logger.setLevel(previous_level)
+    _db_enabled = True
+    log.info(
+        "db_corroboration_enabled",
+        instrumented=sorted(k for k, v in result.items() if v),
+        skipped=sorted(k for k, v in result.items() if not v),
+    )
+    return result
+
+
+def disable_db_corroboration() -> None:
+    """disable_http_corroboration()'s exact counterpart for the database
+    candidates."""
+    global _db_enabled
+    for candidate in _DB_CANDIDATES:
+        try:
+            module = __import__(candidate.module, fromlist=[candidate.class_name])
+            instrumentor_cls = getattr(module, candidate.class_name)
+        except ImportError:
+            continue
+        instrumentor = instrumentor_cls()
+        if instrumentor.is_instrumented_by_opentelemetry:
+            instrumentor.uninstrument()
+    _db_enabled = False
 
 
 def _try_instrument(candidate: _Candidate) -> bool:

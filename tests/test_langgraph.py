@@ -114,6 +114,64 @@ def test_tool_call_allowed(tmp_path: Path) -> None:
     assert result["messages"][-1].content == "Done."
 
 
+def test_tool_call_and_model_call_open_real_exported_spans(tmp_path: Path) -> None:
+    """auth-integrations.md §10.7: langgraph.py previously opened no real
+    OTel span at all for a tool call or a model call (a documented gap in
+    the module's own docstring) -- wrap_model_call/wrap_tool_call now do.
+    Proven the same way test_maf.py's own OTelCorrelation test proves it
+    for MAF: a real TracerProvider + InMemorySpanExporter, a real
+    agent.invoke(), asserting real spans with the right names/attributes
+    actually get exported -- not inferred from the code.
+
+    Does NOT assert the tool_call span's `.parent` is its triggering
+    model_call span -- confirmed live (see the module-level contextvar
+    comments in langgraph.py) that this parenting attempt usually does
+    NOT survive a real agent.invoke() run, because langgraph's own Pregel
+    executor dispatches wrap_model_call/wrap_tool_call via
+    contextvars.copy_context().run(...) per node, which isolates a
+    contextvar .set() in one node from a later node reading it back. A
+    tool_call span this produces is a real, exported, correctly-attributed
+    ROOT span in practice, not a child -- what's asserted below is exactly
+    that achievable property, not the aspirational one."""
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    span_exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+    otel_trace.set_tracer_provider(tracer_provider)
+    # langgraph.py's own module-level `_tracer = trace.get_tracer(__name__)`
+    # is the same lazy proxy maf.py's is (see that module's own comment) --
+    # picks up a provider set after import with no monkeypatch needed.
+
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);',
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+    agent = _agent("lookup_order", {"order_id": "A1"}, mw)
+    agent.invoke({"messages": [{"role": "user", "content": "x"}]})
+
+    all_spans = span_exporter.get_finished_spans()
+    model_spans = [s for s in all_spans if s.name == "parapetai.model_call"]
+    tool_spans = [s for s in all_spans if s.name == "parapetai.tool_call"]
+    assert len(model_spans) == 2  # one pre-tool-call, one after the tool result comes back
+    assert len(tool_spans) == 1
+    tool_span = tool_spans[0]
+    # A real, recorded span (not a NonRecordingSpan/no-op) -- the actual
+    # gap this closes: previously NOTHING like this span existed at all.
+    assert tool_span.context.span_id != 0
+    assert tool_span.context.trace_id != 0
+    assert tool_span.status.status_code != otel_trace.StatusCode.ERROR
+    for span in model_spans:
+        assert span.context.span_id != 0
+        assert span.status.status_code != otel_trace.StatusCode.ERROR
+
+
 def test_tool_call_denied_raises_and_never_runs(tmp_path: Path) -> None:
     _write(
         tmp_path,

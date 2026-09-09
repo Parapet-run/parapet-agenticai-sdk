@@ -154,5 +154,8 @@ agent/runner, not before.
 
 - [Vendor/CRUD metadata](vendor-calls.md) — the declared half this signal
   corroborates.
+- [Automatic vendor/resource/permission detection](vendor-scope-permission.md) —
+  builds on these same spans to classify a call's vendor/product/resource/
+  permission without any `@declare_vendor_call` at all.
 - [Observability](../OBSERVABILITY.md) — `configure_otel()` and the OTLP
   export pipeline this rides.

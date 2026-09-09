@@ -80,6 +80,18 @@ class Snapshot:
     vendor_system: str | None = None
     vendor_operation: str | None = None
     crud_action: str | None = None
+    # auth-integrations.md §10.7: which in-process adapter produced this
+    # snapshot -- "maf" | "adk" | "langgraph" | "governor". None for a
+    # parser-built Snapshot (the gateway/MCP path identifies itself
+    # differently, via the parser's own `provider` field, not this one)
+    # and for any in-process adapter that hasn't been updated to set it
+    # yet. Lets the control plane's coverage matrix (§10.7) tell "no
+    # framework identity was sent" apart from "this really is MCP", and
+    # lets an ObservationSpanProcessor (parapetai_agent.observation) tag a
+    # child network span with which framework produced its ambient
+    # parent -- read from this field at the point each adapter opens its
+    # own tool_call span, not derived after the fact.
+    framework: str | None = None
 
     def to_context(self) -> dict[str, Any]:
         ctx: dict[str, Any] = {
@@ -102,6 +114,8 @@ class Snapshot:
             ctx["vendor_system"] = self.vendor_system
             ctx["vendor_operation"] = self.vendor_operation
             ctx["crud_action"] = self.crud_action
+        if self.framework:
+            ctx["framework"] = self.framework
         if self.response_preview:
             ctx["response_preview"] = self.response_preview
         if self.tool_result_preview:

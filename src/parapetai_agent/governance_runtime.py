@@ -187,6 +187,25 @@ def set_oi_attributes(span: Any, attributes: dict[str, Any]) -> None:
     span.set_attributes({k: oi_attribute_value(v) for k, v in attributes.items() if v is not None})
 
 
+def parent_context_from_span_context(span_context: trace.SpanContext | None) -> Any:
+    """Reconstructs a usable parent Context from a completed/still-open
+    span's SpanContext alone, via a NonRecordingSpan -- so a later span
+    (e.g. a tool_call triggered by an earlier model_call) can be
+    explicitly linked as its child even when the two are opened from
+    genuinely separate callback/method invocations, not nested `with`
+    blocks. adk.py's `_parent_context_from_span_context` and maf.py's
+    `_parent_context_from_correlation` each carry a private copy of this
+    exact technique (predating this shared version) -- kept as-is there
+    (no regression risk to already-tested code); langgraph.py's tool-call
+    correlation (auth-integrations.md §10.7) is this function's first
+    caller, added here rather than as a third private copy, since a
+    framework module added later has one place to reach for this instead
+    of writing a fourth."""
+    if span_context is None:
+        return None
+    return trace.set_span_in_context(trace.NonRecordingSpan(span_context))
+
+
 def audit(
     decision: Decision,
     principal: str,

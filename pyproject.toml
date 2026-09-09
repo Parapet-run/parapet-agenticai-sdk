@@ -1,6 +1,6 @@
 [project]
 name = "parapetai-agent"
-version = "0.10.0"
+version = "0.11.0"
 requires-python = ">=3.12"
 description = "Open-source in-process governance for AI agent frameworks: Cedar-governed model/tool calls via build_middleware()/GovernedAgent, plus the Cedar engine, request/decision shapes, PEP<->control-plane protocol client, and Ed25519 PEP identity they run on."
 readme = "README.md"
@@ -108,25 +108,34 @@ judge = ["litellm>=1.60,<2.0"]
 # (torch drags the CUDA wheel stack into the lockfile). Enable explicitly with
 # `pip install transformers torch` -- see docs/GROUNDEDNESS_HHEM.md. The lexical
 # backend is the dependency-free default.
-# auth-integrations.md §7 Tier 1: observed-vs-declared corroboration for a
-# tool call's real network traffic. Each of these is the OFFICIAL
+# auth-integrations.md §7 Tier 1 / §10.7: observed-vs-declared
+# corroboration and automatic VendorScopePermission detection for a tool
+# call's real network traffic. Each of these is the OFFICIAL
 # opentelemetry-python-contrib instrumentor for its target library --
 # corroboration.enable_http_corroboration() calls every one of them
 # unconditionally; each safely no-ops (BaseInstrumentor's own dependency
 # check, not a try/except this package adds) when ITS OWN target library
 # isn't installed in the calling application, so installing this extra
-# does not require also using every transport it covers. Deliberately
-# HTTP/gRPC transports only, not the database instrumentors
-# opentelemetry-python-contrib also ships (-psycopg2/-pymongo/-redis/
-# -sqlalchemy) -- those observe a tool's OWN datastore, not a downstream
-# vendor API call, which is a different (and not yet designed) question
-# from "does this tool's declared crud_action match what it did."
+# does not require also using every transport it covers.
 corroboration = [
     "opentelemetry-instrumentation-httpx>=0.48,<1.0",
     "opentelemetry-instrumentation-requests>=0.48,<1.0",
     "opentelemetry-instrumentation-urllib3>=0.48,<1.0",
     "opentelemetry-instrumentation-aiohttp-client>=0.48,<1.0",
     "opentelemetry-instrumentation-grpc>=0.48,<1.0",
+    "opentelemetry-sdk>=1.27,<2.0",
+]
+# auth-integrations.md §10.7: the "database" cell of the framework/protocol
+# coverage matrix, closed. Kept as its own extra rather than folded into
+# `corroboration` above -- corroboration.enable_db_corroboration() is a
+# separate opt-in from enable_http_corroboration(), see that module's own
+# comment on why silently tracing a caller's database queries under the
+# `corroboration` extra name would be a real surprise.
+corroboration-db = [
+    "opentelemetry-instrumentation-psycopg2>=0.48,<1.0",
+    "opentelemetry-instrumentation-pymongo>=0.48,<1.0",
+    "opentelemetry-instrumentation-redis>=0.48,<1.0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48,<1.0",
     "opentelemetry-sdk>=1.27,<2.0",
 ]
 dev = [

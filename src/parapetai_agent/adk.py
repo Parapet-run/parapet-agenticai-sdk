@@ -152,6 +152,7 @@ from google.genai import types
 from opentelemetry import trace
 from opentelemetry.trace import NonRecordingSpan, Span, SpanContext, Status, StatusCode
 
+from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.control_plane import bootstrap_engine
@@ -506,6 +507,7 @@ class ParapetPlugin(BasePlugin):
         self._trust_session_user_id = trust_session_user_id
         self._model_correlations: dict[str, _ModelCorrelation] = {}
         self._tool_spans: dict[tuple[str, str], Span] = {}
+        self._tool_framework_scopes: dict[tuple[str, str], _observation.FrameworkScope] = {}
         # Provider per invocation, kept SEPARATELY from _model_correlations
         # because after_model_callback pops the correlation as soon as the
         # model responds -- which is BEFORE the tool calls that response
@@ -718,6 +720,16 @@ class ParapetPlugin(BasePlugin):
         parent_ctx = _parent_context_from_span_context(correlation.span_context)
         span = _tracer.start_span("parapetai.tool_call", context=parent_ctx)
         self._tool_spans[call_key] = span
+        # auth-integrations.md §10.7: ADK's tool call itself runs OUTSIDE
+        # this method, between before_tool_callback returning and
+        # after_tool_callback firing (ADK's own runtime invokes the tool,
+        # not this SDK), so there is no single call frame to wrap in a
+        # `with set_current_framework("adk"):` block the way
+        # MAF/LangGraph/Governor can. Bracketed explicitly instead: this
+        # activates the scope now, after_tool_callback below retrieves
+        # and resets it -- same pop-on-the-way-out shape self._tool_spans
+        # already uses for `span`.
+        self._tool_framework_scopes[call_key] = _observation.set_current_framework("adk")
         _set_oi_attributes(span, {oi.SPAN_KIND_ATTR: oi.SpanKind.TOOL, oi.TOOL_NAME: tool.name})
         if _log_content_enabled():
             _set_oi_attributes(span, {oi.TOOL_PARAMETERS: json.dumps(tool_args, default=str)})
@@ -742,6 +754,7 @@ class ParapetPlugin(BasePlugin):
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
+            framework="adk",
         )
         # COST-TRACK-1: scope_id is the TRIGGERING model_call's own span id
         # (via `correlation`, the SAME link this tool_call span was parented
@@ -773,6 +786,9 @@ class ParapetPlugin(BasePlugin):
         invocation_id = tool_context.invocation_id
         call_key = (invocation_id, tool_context.function_call_id or "")
         span = self._tool_spans.pop(call_key, None)
+        framework_scope = self._tool_framework_scopes.pop(call_key, None)
+        if framework_scope is not None:
+            framework_scope.reset()
         correlation = self._model_correlations.get(invocation_id) or _ModelCorrelation(
             principal=_effective_principal(self.caller),
             identity_claims=_resolved_identity_claims(
@@ -799,6 +815,7 @@ class ParapetPlugin(BasePlugin):
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,
+                framework="adk",
             )
             trace_id, scope_id = _tool_call_cost_ids(correlation, span) if span else (None, None)
             post = self.hook.evaluate(

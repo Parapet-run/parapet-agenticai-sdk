@@ -104,6 +104,7 @@ nav:
       - governed_identity: reference/governed-identity.md
       - Vendor/CRUD metadata: reference/vendor-calls.md
       - Corroboration: reference/corroboration.md
+      - Automatic vendor/resource/permission detection: reference/vendor-scope-permission.md
       - Cost & token tracking: reference/cost-tracking.md
       - Decision: reference/decision.md
       - Exceptions: reference/exceptions.md

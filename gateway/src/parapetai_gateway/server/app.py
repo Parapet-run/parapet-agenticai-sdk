@@ -27,16 +27,26 @@ import httpx
 import structlog
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from opentelemetry import trace as _otel_trace
 from starlette.concurrency import run_in_threadpool
 
-from parapetai_agent import governance_runtime
+from parapetai_agent import governance_runtime, observation
 from parapetai_agent.control_plane import ReviewClient, review_fingerprint
 from parapetai_agent.identity import Caller, resolve_from_path
 from parapetai_agent.policy.engine import Decision, PolicyEngine
 from parapetai_agent.providers.parsers import Snapshot, parse_request
 from parapetai_gateway import mcp_oauth
-from parapetai_gateway.config import settings
+from parapetai_gateway.config import Upstream, settings
 from parapetai_gateway.fingerprint import fingerprint
+
+# auth-integrations.md §10.16 Phase B: one tracer for the whole module,
+# same per-instrumentation-scope convention every framework adapter in the
+# SDK repo already uses (`_tracer = trace.get_tracer(__name__)`). Safe to
+# resolve unconditionally regardless of whether configure_otel() has run --
+# the OTel API always falls back to a no-op provider until an SDK provider
+# is registered, so a gateway run with no control plane configured just
+# exports nothing, exactly like every other OTel emission in this process.
+_tracer = _otel_trace.get_tracer(__name__)
 
 # The header a held call comes back on, and the one a client re-presents to
 # collect its approval. Named once: a typo in either direction would silently
@@ -71,6 +81,17 @@ def create_app(engine: PolicyEngine, reviews: ReviewClient | None = None) -> Fas
     app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout)
     observations: deque[dict[str, Any]] = deque(maxlen=_OBSERVATIONS_CAP)
     app.state.observations = observations
+    # auth-integrations.md §10.16 Phase B: one CollectionBudget per app
+    # instance (not module-global), same reasoning as the in-process SDK's
+    # own "one per Bootstrap" -- a process embedding more than one gateway
+    # app (unusual, but create_app() doesn't forbid it) must not have one
+    # instance's saturated-bucket list suppress another's observations.
+    # server/main.py wires update_from_bundle_meta as run_bundle_poller's
+    # on_bundle_meta callback; with no control plane configured this just
+    # never receives an update and stays permanently un-saturated, which is
+    # harmless -- emit_observed_span() exports through whatever tracer
+    # provider is active, a no-op provider when configure_otel() never ran.
+    app.state.vsp_budget = observation.CollectionBudget()
 
     @app.on_event("shutdown")
     async def _close() -> None:
@@ -293,6 +314,53 @@ def _mcp_target(path: str) -> str | None:
     return rest.lstrip("/").split("/", 1)[0] or None
 
 
+def _observe_mcp_call(
+    budget: observation.CollectionBudget,
+    *,
+    agent_id: str,
+    snapshot: Snapshot,
+    mcp_target: str | None,
+    upstream: Upstream,
+) -> None:
+    """auth-integrations.md §10.16 Phase B: the inbound MCP tool call the
+    gateway is about to forward IS the observation (per §10.7's coverage
+    matrix note: "no outbound instrumentation needed, just wiring
+    MCPParser's output... into the same ObservedCall shape") --
+    MCPParser.parse already extracted tool_name/tool_args off the wire
+    with certainty, so unlike the in-process SDK's corroboration-
+    piggybacked ObservationSpanProcessor (which infers a call's shape from
+    semantic-convention attributes on a real outbound network span this
+    module didn't create), this constructs the ObservedCall directly and
+    hands it to observation.emit_observed_span, which opens its own
+    standalone span.
+
+    `agent_id` is `settings.agent_id` -- this gateway's OWN registered
+    fleet identity, the one its OTLP export authenticates as (server/
+    main.py's configure_otel call) -- deliberately NOT `caller.agent_id`
+    (the unauthenticated per-request /a/{agent_id} path claim, CLAUDE.md
+    invariant 9). The control plane's ingestion side derives agent_id from
+    the bearer secret that authenticated the POST
+    (parapetai_control.otlp.ingest_traces's `Depends(require_agent_secret)`),
+    never from a span attribute -- a bucket key computed with any other
+    agent_id could never match what the server itself computes for this
+    exact call, breaking the saturation mechanism silently rather than
+    loudly. `destination` is upstream.base_url's host only, matching the
+    in-process SDK's own HTTP capture (server.address/net.peer.name are
+    hostnames, never a full URL with path/query) -- see observation.py's
+    module docstring on why this is content-free by construction.
+    """
+    host = httpx.URL(upstream.base_url).host or None
+    observed = observation.ObservedCall(
+        protocol="mcp",
+        verb=snapshot.tool_name or "",
+        target=mcp_target or "mcp",
+        destination=host,
+        framework=None,
+        args_shape=tuple(sorted(snapshot.tool_args.keys())),
+    )
+    observation.emit_observed_span(agent_id, budget, observed, tracer=_tracer)
+
+
 @router.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def proxy(full_path: str, request: Request) -> Response:
     engine: PolicyEngine = request.app.state.engine
@@ -420,6 +488,25 @@ async def proxy(full_path: str, request: Request) -> Response:
     if upstream is None:
         detail = f"mcp target {mcp_target!r}" if mcp_target else snapshot.provider
         return _error(502, "no_upstream", f"no upstream configured for {detail}")
+
+    # auth-integrations.md §10.16 Phase B. Placed here deliberately, not
+    # earlier: everything above this point can still end in an early
+    # return (blocked-and-enforcing, or no upstream configured) -- by this
+    # line the call is definitely about to reach a real downstream MCP
+    # server, matching the in-process SDK's own "only a network call that
+    # actually happens gets corroborated/observed" principle (a Cedar-
+    # denied tool call in enforce mode never runs, so never makes one
+    # either). tool_name is only ever set for a genuine `tools/call`
+    # (MCPParser.parse) -- other JSON-RPC methods (initialize, tools/list,
+    # ...) carry no tool invocation to observe.
+    if snapshot.provider == "mcp" and snapshot.tool_name and settings.agent_id:
+        _observe_mcp_call(
+            request.app.state.vsp_budget,
+            agent_id=settings.agent_id,
+            snapshot=snapshot,
+            mcp_target=mcp_target,
+            upstream=upstream,
+        )
 
     # MCP's Streamable HTTP transport opens its server->client notification
     # channel with a bare GET (no JSON body for MCPParser to read a `stream`

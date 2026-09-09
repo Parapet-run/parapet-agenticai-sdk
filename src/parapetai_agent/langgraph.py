@@ -37,15 +37,31 @@ doesn't exist yet:
   `check_input`/`check_output`-equivalent Cedar gating (`model_call`/
   `post` stages) IS implemented; the additional PII/injection/groundedness/
   judge scanners a control-plane bundle can carry are not wired in yet.
-- **No per-call OTel span with OpenInference attributes** (token counts,
-  model name, `parapetai.model_call` span). Decisions still reach OTel as
-  LogRecords via `governance_runtime.audit()` (the same sink MAF/ADK
-  use) -- what's missing is the additional per-call *span*, not decision
-  observability entirely. Cumulative cost/token tracking (below) does NOT
-  depend on this gap being closed -- it derives its own trace/span ids
-  from `before_agent`/`after_agent`/`wrap_model_call` rather than from an
-  OTel `SpanContext` the way `maf.py`/`adk.py` do, since no such
-  `SpanContext` exists here yet.
+- ~~No per-call OTel span with OpenInference attributes~~ **Mostly closed
+  (auth-integrations.md §10.7).** `wrap_model_call`/`awrap_model_call` now
+  open a real `parapetai.model_call` span; `wrap_tool_call`/
+  `awrap_tool_call` open a real `parapetai.tool_call` span. This is what
+  lets `corroboration.py`'s instrumented network child spans -- and
+  `observation.py`'s VendorScopePermission capture -- have somewhere real
+  to nest under for this framework; previously neither could correlate
+  anything for LangGraph at all, and that nesting (ambient, within
+  `wrap_tool_call`'s own call frame) works regardless of the item below.
+  **What's NOT reliably closed**: explicit parenting of the tool_call span
+  to its triggering model_call span, attempted via
+  `governance_runtime.parent_context_from_span_context()` (the two are
+  separate method invocations, not nested `with` blocks -- same technique
+  `adk.py`'s own before/after-callback split uses) -- confirmed live that
+  this usually does NOT survive a real `agent.invoke()` run, because
+  langgraph's own Pregel executor dispatches each node via
+  `contextvars.copy_context().run(...)`, which isolates a `.set()` made in
+  one node from a later one reading it back. A tool_call span this
+  produces is therefore usually a ROOT span (still real, still exported,
+  still correctly nested with its OWN network children), not a child of
+  its model_call -- see the module-level contextvar comments for the full
+  finding, including that the SAME limitation was already silently true
+  of cumulative cost/token tracking's trace/span-id correlation (a
+  separate, pre-existing, untested-until-now gap, not fixed in this
+  pass).
 - **Streaming has not been verified against a live streaming
   `.astream()`/`.stream()` call** -- treat as unverified, not assumed
   either way, the same caution `adk.py`'s own docstring applies to its own
@@ -67,7 +83,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse, ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+from opentelemetry import trace as _otel_trace
+from opentelemetry.trace import Status, StatusCode
 
+from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
 from parapetai_agent.control_plane import bootstrap_engine
 from parapetai_agent.governance_runtime import GovernanceDenied as GovernanceDenied
@@ -79,6 +98,9 @@ from parapetai_agent.governance_runtime import (
 from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
+from parapetai_agent.governance_runtime import (
+    parent_context_from_span_context as _parent_context_from_span_context,
+)
 from parapetai_agent.governance_runtime import record_tool_denial as _record_tool_denial
 from parapetai_agent.governance_runtime import (
     resolve_local_output_settings as _resolve_local_output_settings,
@@ -110,6 +132,17 @@ log = structlog.get_logger(__name__)
 
 _PREVIEW_CHARS = 4000
 
+# configure_otel() calls trace.set_tracer_provider() -- this lazy proxy
+# re-resolves against whatever provider is globally current at every
+# start_as_current_span() call, same reasoning as maf.py's own module-level
+# _tracer. Auth-integrations.md §10.7: this is what closes this module's
+# own previously-documented "No per-call OTel span" gap (see the module
+# docstring's Known Gaps, since amended) -- a real parapetai.model_call/
+# parapetai.tool_call span now opens per call, which is what gives
+# corroboration.py's instrumented network child spans somewhere real to
+# nest under.
+_tracer = _otel_trace.get_tracer(__name__)
+
 # One CostTracker per process, same pattern as maf.py/adk.py's own
 # module-level _cost_tracker -- trace_id is globally unique (random hex),
 # so sharing is safe and avoids a second instance per ParapetAgentMiddleware.
@@ -117,24 +150,77 @@ _cost_tracker = CostTracker()
 
 # TRACE = one before_agent/after_agent bracket (the whole agent.invoke()/
 # ainvoke() run). SPAN = one model_call turn plus whatever tool_call(s) it
-# triggers. Unlike maf.py/adk.py, there is no OTel SpanContext to derive
-# these from yet (see module docstring's Known Gaps), so they're generated
-# here and threaded through contextvars -- the same mechanism, and the
-# same reason, as maf.py's _current_chat: correctly isolated per asyncio
-# task under concurrent agent.invoke() calls sharing one middleware
-# instance, where a plain instance attribute would leak across concurrent
-# runs. `_current_span_id` is set once per wrap_model_call/awrap_model_call
-# and deliberately LEFT SET rather than reset in a finally -- confirmed
-# live (a scripted multi-turn tool-calling run) that before_agent,
-# wrap_model_call, wrap_tool_call, wrap_model_call, after_agent fire as
-# SEPARATE, SEQUENTIAL steps, never nested, so a reset-on-return would
-# clear it before the tool_call that needs it ever reads it -- exactly the
-# bug _current_chat's own docstring in maf.py describes hitting once.
+# triggers. `_current_trace_id`/`_current_span_id` are STRING ids, generated
+# here rather than derived from an OTel SpanContext.
+#
+# KNOWN, PRE-EXISTING GAP -- found while adding real spans (auth-
+# integrations.md §10.7), NOT introduced by that work, and NOT fixed here
+# (out of scope for a detection-capture pass; needs its own investigation
+# and test): contextvars.ContextVar values set inside wrap_model_call do
+# NOT reliably survive into a LATER wrap_tool_call call under a real
+# langgraph.create_agent().invoke() run. Confirmed live -- monkeypatched
+# _tool_snapshot to print _current_span_id.get()/_current_trace_id.get()
+# during a real single-tool-call agent.invoke() and observed BOTH as None,
+# even though before_agent/wrap_model_call had already run and set them.
+# Root cause, not fully chased down but consistent with what's observed:
+# langgraph's own Pregel executor (langgraph/pregel/_executor.py) dispatches
+# node execution via `contextvars.copy_context().run(...)`, which takes an
+# independent SNAPSHOT per submission -- a `.set()` made inside one node's
+# copy does not propagate back out to whatever context a LATER node's own
+# copy is taken from. The comment this replaced claimed this was
+# "confirmed live" to work; what was actually confirmed was only that the
+# CALLS fire in sequential, non-nested order, not that ContextVar VALUES
+# survive the hop between them. The two existing cumulative-cost tests
+# whose docstrings claim to prove this correlation
+# (test_trace_cumulative_tokens_denies_a_later_turn_once_over_budget,
+# test_tool_call_sees_span_cumulative_tokens_from_its_triggering_model_call)
+# both currently pass for an UNRELATED reason: their own Cedar fixture
+# never grants a `permit` for the tool_call/second-model_call action being
+# exercised, so Cedar's own default-deny denies the call regardless of
+# whether span_cumulative_tokens/trace_cumulative_tokens ever crossed the
+# stated budget -- confirmed live: the raised GovernanceDenied's own
+# `.reason` is "denied: no permit matched or forbid applied" with an EMPTY
+# determining_policies tuple, not the named forbid rule. Both tests need a
+# real fix (add the missing permit, then re-verify the specific forbid
+# actually fires) as follow-up work; left exactly as they were here since
+# fixing them is a correctness project of its own, not something to fold
+# into this pass silently.
+#
+# `_current_model_span_context` below inherits this SAME limitation --
+# it's a real, working mechanism (proven correct in isolation:
+# governance_runtime.parent_context_from_span_context() is exactly what
+# adk.py/maf.py already use successfully for their own cross-call
+# parenting) that, under langgraph's actual Pregel dispatch, typically
+# reads back None by the time wrap_tool_call runs, same as
+# `_current_span_id` above -- so a tool_call span usually comes out
+# UNPARENTED (a root span) rather than nested under its model_call, in a
+# real agent.invoke() run. Kept anyway, not deleted: (a) harmless when it
+# doesn't apply -- `parent_context_from_span_context(None)` returns None,
+# which is exactly "no explicit parent", the same as not passing `context=`
+# at all; (b) it DOES work when these methods are invoked directly
+# (bypassing the Pregel executor -- e.g. a future non-graph embedding, or
+# tests that call wrap_model_call/wrap_tool_call directly); (c) the tool_call
+# span itself is still real and still exported either way -- an unparented
+# tool_call span is exactly as usable a nesting point for a real network
+# child call (corroboration.py/observation.py) as a parented one, since
+# that correlation happens ambiently within wrap_tool_call's own `with`
+# block, same thread, same call frame -- untouched by any of the above.
+# threaded through contextvars -- the same mechanism, and the same reason,
+# as maf.py's _current_chat: correctly isolated per asyncio task under
+# concurrent agent.invoke() calls sharing one middleware instance, where a
+# plain instance attribute would leak across concurrent runs.
+# `_current_span_id`/`_current_model_span_context` are set once per
+# wrap_model_call/awrap_model_call and deliberately LEFT SET rather than
+# reset in a finally -- for the (real, if narrower-than-previously-claimed)
+# case where they DO carry over.
 _current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "parapetai_agent_langgraph_current_trace_id", default=None
 )
 _current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "parapetai_agent_langgraph_current_span_id", default=None
+)
+_current_model_span_context: contextvars.ContextVar[_otel_trace.SpanContext | None] = (
+    contextvars.ContextVar("parapetai_agent_langgraph_current_model_span_context", default=None)
 )
 
 
@@ -235,6 +321,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
             _cost_tracker.end_trace(trace_id)
         _current_trace_id.set(None)
         _current_span_id.set(None)
+        _current_model_span_context.set(None)
 
     # ------------------------------------------------------------------ #
     # model call -- pre (Cedar model_call) then post (Cedar post)
@@ -312,55 +399,75 @@ class ParapetAgentMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
-            self._pre_model_snapshot(request)
-        )
-        pre = self.hook.evaluate(
-            snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
-        )
-        if not pre.decision.allowed:
-            raise GovernanceDenied(pre.decision)
+        with (
+            _observation.set_current_framework("langgraph"),
+            _tracer.start_as_current_span("parapetai.model_call") as span,
+        ):
+            _current_model_span_context.set(span.get_span_context())
+            pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
+                self._pre_model_snapshot(request)
+            )
+            pre = self.hook.evaluate(
+                snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
+            )
+            if not pre.decision.allowed:
+                span.set_status(Status(StatusCode.ERROR, pre.decision.reason))
+                raise GovernanceDenied(pre.decision)
 
-        response = handler(request)
+            response = handler(request)
 
-        post_context = self._record_usage(scope, response)
-        post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
-        post = self.hook.evaluate(
-            snapshot=post_snapshot, stage="post", principal=principal, extra_context=post_context
-        )
-        if not post.decision.allowed:
-            raise GovernanceDenied(post.decision)
-        # post.alter_with: ALTER is not yet supported by this adapter (see
-        # module docstring) -- a bundle that annotates a permit with
-        # @action("alter") on a stage this module governs would silently
-        # be treated as a plain allow here. Tracked as a known gap, not a
-        # silent behavior difference callers should discover by accident.
-        return response
+            post_context = self._record_usage(scope, response)
+            post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
+            post = self.hook.evaluate(
+                snapshot=post_snapshot,
+                stage="post",
+                principal=principal,
+                extra_context=post_context,
+            )
+            if not post.decision.allowed:
+                span.set_status(Status(StatusCode.ERROR, post.decision.reason))
+                raise GovernanceDenied(post.decision)
+            # post.alter_with: ALTER is not yet supported by this adapter (see
+            # module docstring) -- a bundle that annotates a permit with
+            # @action("alter") on a stage this module governs would silently
+            # be treated as a plain allow here. Tracked as a known gap, not a
+            # silent behavior difference callers should discover by accident.
+            return response
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
-            self._pre_model_snapshot(request)
-        )
-        pre = self.hook.evaluate(
-            snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
-        )
-        if not pre.decision.allowed:
-            raise GovernanceDenied(pre.decision)
+        with (
+            _observation.set_current_framework("langgraph"),
+            _tracer.start_as_current_span("parapetai.model_call") as span,
+        ):
+            _current_model_span_context.set(span.get_span_context())
+            pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
+                self._pre_model_snapshot(request)
+            )
+            pre = self.hook.evaluate(
+                snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
+            )
+            if not pre.decision.allowed:
+                span.set_status(Status(StatusCode.ERROR, pre.decision.reason))
+                raise GovernanceDenied(pre.decision)
 
-        response = await handler(request)
+            response = await handler(request)
 
-        post_context = self._record_usage(scope, response)
-        post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
-        post = self.hook.evaluate(
-            snapshot=post_snapshot, stage="post", principal=principal, extra_context=post_context
-        )
-        if not post.decision.allowed:
-            raise GovernanceDenied(post.decision)
-        return response
+            post_context = self._record_usage(scope, response)
+            post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
+            post = self.hook.evaluate(
+                snapshot=post_snapshot,
+                stage="post",
+                principal=principal,
+                extra_context=post_context,
+            )
+            if not post.decision.allowed:
+                span.set_status(Status(StatusCode.ERROR, post.decision.reason))
+                raise GovernanceDenied(post.decision)
+            return response
 
     # ------------------------------------------------------------------ #
     # tool call -- one Cedar tool_call decision before the tool runs
@@ -391,6 +498,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
+            framework="langgraph",
         )
         # COST-TRACK: scope_id is the TRIGGERING model_call's own span id
         # (whatever wrap_model_call last set -- see the module-level
@@ -410,28 +518,49 @@ class ParapetAgentMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
-        snapshot, principal, cost_context = self._tool_snapshot(request)
-        decision = self.hook.evaluate(
-            snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
-        )
-        if not decision.decision.allowed:
-            _record_tool_denial(decision.decision.reason)
-            raise GovernanceDenied(decision.decision)
-        return handler(request)
+        # Explicitly linked to the triggering model_call span via its
+        # SpanContext, not ambient nesting -- wrap_model_call and
+        # wrap_tool_call fire as SEPARATE, SEQUENTIAL steps (see the
+        # module-level contextvar comments), so there is no `with` block
+        # to nest inside the way MAF's tool_call span can.
+        with (
+            _observation.set_current_framework("langgraph"),
+            _tracer.start_as_current_span(
+                "parapetai.tool_call",
+                context=_parent_context_from_span_context(_current_model_span_context.get()),
+            ) as span,
+        ):
+            snapshot, principal, cost_context = self._tool_snapshot(request)
+            decision = self.hook.evaluate(
+                snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
+            )
+            if not decision.decision.allowed:
+                span.set_status(Status(StatusCode.ERROR, decision.decision.reason))
+                _record_tool_denial(decision.decision.reason)
+                raise GovernanceDenied(decision.decision)
+            return handler(request)
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        snapshot, principal, cost_context = self._tool_snapshot(request)
-        decision = self.hook.evaluate(
-            snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
-        )
-        if not decision.decision.allowed:
-            _record_tool_denial(decision.decision.reason)
-            raise GovernanceDenied(decision.decision)
-        return await handler(request)
+        with (
+            _observation.set_current_framework("langgraph"),
+            _tracer.start_as_current_span(
+                "parapetai.tool_call",
+                context=_parent_context_from_span_context(_current_model_span_context.get()),
+            ) as span,
+        ):
+            snapshot, principal, cost_context = self._tool_snapshot(request)
+            decision = self.hook.evaluate(
+                snapshot=snapshot, stage="pre", principal=principal, extra_context=cost_context
+            )
+            if not decision.decision.allowed:
+                span.set_status(Status(StatusCode.ERROR, decision.decision.reason))
+                _record_tool_denial(decision.decision.reason)
+                raise GovernanceDenied(decision.decision)
+            return await handler(request)
 
 
 @dataclass(slots=True)

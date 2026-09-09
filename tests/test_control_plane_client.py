@@ -331,6 +331,60 @@ def test_run_bundle_poller_sends_a_heartbeat_per_cycle_when_engine_given(tmp_pat
     assert heartbeat_route.called
 
 
+@respx.mock
+def test_run_bundle_poller_calls_on_bundle_meta_every_cycle(tmp_path: Path) -> None:
+    # auth-integrations.md §10.3/§10.17: CollectionBudget.update_from_bundle_meta
+    # (parapetai_agent.observation) is wired here exactly like this -- must
+    # fire on the bundle-poll response every cycle, not just once at
+    # bootstrap (unlike bootstrap_engine()'s one-shot vendor_scoped_resources
+    # read), since a saturation/resume instruction needs to take effect on
+    # a later poll, not only the first one.
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(
+        return_value=Response(
+            200,
+            json={
+                "agent_id": "pa-1",
+                "digest": "d1",
+                "observation_collection": {"saturated_buckets": ["ob-abc"]},
+                "files": {
+                    "00-base.cedar": "permit (principal, action, resource);",
+                    "entities.json": "[]",
+                },
+            },
+        )
+    )
+    policy_dir = tmp_path / "policies"
+    sync_bundle_to_disk(
+        {
+            "files": {
+                "00-base.cedar": "permit (principal, action, resource);",
+                "entities.json": "[]",
+            }
+        },
+        policy_dir,
+    )
+    engine = PolicyEngine(policy_dir, policy_dir / "entities.json")
+    stop_event = threading.Event()
+    seen: list[dict[str, object]] = []
+
+    def _record(bundle: dict[str, object]) -> None:
+        seen.append(bundle)
+        stop_event.set()
+
+    run_bundle_poller(
+        CONTROL_PLANE_URL,
+        "the-secret",
+        policy_dir,
+        interval_s=0.01,
+        engine=engine,
+        stop_event=stop_event,
+        on_bundle_meta=_record,
+    )
+
+    assert len(seen) == 1
+    assert seen[0]["observation_collection"] == {"saturated_buckets": ["ob-abc"]}
+
+
 def _mock_bootstrap_endpoints(vendor_scoped_resources: bool | None) -> None:
     """Registers the two endpoints bootstrap_engine(start_poller=False)
     actually calls: key registration and the bundle pull. `None` omits

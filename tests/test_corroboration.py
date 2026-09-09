@@ -32,7 +32,12 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from parapetai_agent.corroboration import _try_instrument, enable_http_corroboration
+from parapetai_agent.corroboration import (
+    _try_instrument,
+    disable_db_corroboration,
+    enable_db_corroboration,
+    enable_http_corroboration,
+)
 
 
 class _FakeCandidate:
@@ -54,6 +59,42 @@ def test_enable_reports_per_library_status_and_never_raises() -> None:
     result = enable_http_corroboration()
     assert set(result) == {"httpx", "requests", "urllib3", "aiohttp", "grpc"}
     assert all(isinstance(v, bool) for v in result.values())
+
+
+def test_enable_db_reports_per_library_status_and_never_raises() -> None:
+    try:
+        result = enable_db_corroboration()
+        assert set(result) == {"psycopg2", "pymongo", "redis", "sqlalchemy"}
+        assert all(isinstance(v, bool) for v in result.values())
+    finally:
+        disable_db_corroboration()
+
+
+def test_enable_db_is_idempotent() -> None:
+    try:
+        first = enable_db_corroboration()
+        second = enable_db_corroboration()
+        assert first == second
+    finally:
+        disable_db_corroboration()
+
+
+def test_enable_db_is_independent_of_http_corroboration() -> None:
+    # auth-integrations.md §10.7: a separate opt-in, not folded into
+    # enable_http_corroboration() -- proves enabling db doesn't flip the
+    # http flag as a side effect. (Not the reverse assertion: module-level
+    # _enabled/_db_enabled aren't reset between tests in this file, so an
+    # earlier test's enable_http_corroboration() may already be True here
+    # -- this test only owns and asserts the db flag.)
+    from parapetai_agent import corroboration
+
+    was_http_enabled = corroboration.http_corroboration_enabled()
+    try:
+        enable_db_corroboration()
+        assert corroboration.db_corroboration_enabled() is True
+        assert corroboration.http_corroboration_enabled() is was_http_enabled
+    finally:
+        disable_db_corroboration()
 
 
 def test_enable_is_idempotent() -> None:

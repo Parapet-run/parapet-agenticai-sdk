@@ -213,6 +213,7 @@ from opentelemetry import trace
 from opentelemetry.context import Context as OtelContext
 from opentelemetry.trace import NonRecordingSpan, SpanContext, Status, StatusCode
 
+from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.control_plane import bootstrap_engine
@@ -1056,9 +1057,12 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
         # docstring for why ambient nesting alone would not work here
         # (ChatMiddleware and FunctionMiddleware fire as sequential
         # siblings, not one inside the other).
-        with _tracer.start_as_current_span(
-            "parapetai.tool_call", context=_parent_context_from_correlation(chat)
-        ) as span:
+        with (
+            _observation.set_current_framework("maf"),
+            _tracer.start_as_current_span(
+                "parapetai.tool_call", context=_parent_context_from_correlation(chat)
+            ) as span,
+        ):
             identity_claims = _identity_claims(context.kwargs)
             identity_roles = _identity_roles(context.kwargs)
             tool_args = _model_to_dict(context.arguments)
@@ -1075,6 +1079,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,
+                framework="maf",
             )
             _set_oi_attributes(
                 span,

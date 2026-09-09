@@ -187,5 +187,8 @@ restart), not mid-process.
 
 - [Corroboration](corroboration.md) — the observed, harder-to-spoof
   signal layered on top of this declared one.
+- [Automatic vendor/resource/permission detection](vendor-scope-permission.md) —
+  the control-plane-classified successor to hand-declaring this; this
+  decorator still works as an optional override signal.
 - [`Decision`](decision.md) — how `context` reaches Cedar.
 - [Governor](governor.md) — `from_control_plane()`.

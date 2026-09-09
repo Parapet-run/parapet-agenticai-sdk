@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.0]
+
+### Added
+- **Automatic vendor/resource/permission detection** (`parapetai_agent.observation`),
+  replacing hand-declared `@declare_vendor_call` as the *primary*
+  classification path (the decorator still works, now as an optional,
+  highest-weighted override signal). Detection happens by watching a
+  tool's real network traffic — no per-tool declaration burden on the
+  agent author — and the control plane classifies what it observes into
+  a vendor/product/resource/permission match for a human to accept. See
+  [the new reference doc](docs/reference/vendor-scope-permission.md) for
+  the full picture, including the two capture paths below.
+- **In-process capture** (MAF, ADK, LangGraph, Governor): a new
+  `enable_observation_capture(agent_id)` call tags a subset of the spans
+  [`corroboration`](docs/reference/corroboration.md) already produces.
+  Each framework adapter now also tags its own `parapetai.tool_call` span
+  with its framework name (`maf`/`adk`/`langgraph`/`governor`), so a
+  captured observation carries which integration produced it. New
+  `corroboration-db` extra (`psycopg2`/`pymongo`/`redis`/`sqlalchemy`
+  instrumentors) extends corroboration's existing HTTP/gRPC-only coverage
+  to a tool's own datastore calls, as a separate opt-in
+  (`enable_db_corroboration()`) that doesn't change `enable_http_corroboration()`'s
+  existing behavior.
+- **Gateway capture, fully automatic**: `parapetai-gateway` now observes
+  every proxied `tools/call` MCP request that isn't blocked, with zero
+  configuration beyond what a control-plane-governed gateway deployment
+  already needs (`PARAPETAI_AGENT_ID`/`PARAPETAI_AGENT_SECRET`/
+  `PARAPETAI_CONTROL_PLANE_URL`). Unlike the in-process path, there is no
+  outbound span to piggyback on — the gateway already parses the tool
+  call off the wire with certainty, so it constructs the observation
+  directly and exports it as a standalone span via the same OTLP pipe its
+  decision audit already uses.
+- **Server-controlled collection budget**: the control plane caps how
+  many samples it wants per distinct call shape, then instructs every PEP
+  (in-process or gateway) to stop enriching that shape via the existing
+  bundle-poll response — bounding the OTLP traffic and control-plane
+  storage this feature costs, with no separate polling channel.
+
 ## [0.10.0]
 
 ### Changed

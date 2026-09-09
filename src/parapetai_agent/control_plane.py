@@ -542,11 +542,23 @@ def run_bundle_poller(
     key_path: str | Path | None = None,
     persist_to_disk: bool = True,
     on_bundle: Callable[[dict[str, str]], None] | None = None,
+    on_bundle_meta: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Blocking poll loop -- run this in a daemon thread, same shape as
     parapetai_gateway.server.main._watch(). `stop_event` (a threading.Event) is
     test-only: pass one and .set() it to exit the loop instead of running
     forever.
+
+    on_bundle_meta, when given, is called with the FULL bundle response
+    EVERY cycle -- unlike bootstrap_engine()'s one-shot use of the same
+    parameter (read once for vendor_scoped_resources, by design; see
+    Bootstrap's own docstring for why that field deliberately does not
+    hot-reload), a caller here gets every cycle's response, because some
+    bundle-level metadata genuinely needs to. auth-integrations.md
+    §10.3/§10.17's CollectionBudget is the reason this parameter exists on
+    this function at all: wire `budget.update_from_bundle_meta` here so a
+    server-issued saturation (or resumed-collection) instruction takes
+    effect on the very next poll, not only at process bootstrap.
 
     `engine`, when given, is passed straight through to poll_once() each
     cycle -- a fetched bundle is applied to it directly (PolicyEngine.
@@ -590,6 +602,7 @@ def run_bundle_poller(
             private_key=current_key,
             persist_to_disk=persist_to_disk,
             on_bundle=on_bundle,
+            on_bundle_meta=on_bundle_meta,
         )
         if engine is not None and pep_id:
             status = engine.status

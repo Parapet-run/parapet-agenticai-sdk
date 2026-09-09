@@ -23,6 +23,42 @@ def _reset_identity_store():
 
 
 @pytest.fixture(autouse=True)
+def _reset_govern_span_state() -> Iterator[None]:
+    """parapetai_agent.govern's _current_model_span/_current_tool_span
+    (auth-integrations.md §10.7) are real _OpenSpan objects holding an
+    opentelemetry.context.attach() token -- module-level contextvar state
+    with no natural close point of its own (see _OpenSpan's own
+    docstring), same class of leak-across-tests risk
+    _reset_otel_module_state below already guards against for OTel's
+    provider globals. Confirmed live: an async @gov.tool invocation in one
+    test can leave a token whose Context does not match a LATER test's own
+    Context (a genuine cross-Context attach/detach mismatch, not just a
+    hygiene nicety) -- _OpenSpan.close() already tolerates that itself
+    (never raises), but without this reset the STALE span/framework tag
+    stays "current" and leaks into whichever test runs next, same
+    observable failure mode _reset_otel_module_state's own docstring
+    describes for a stale TracerProvider."""
+    yield
+    import parapetai_agent.govern as govern_module
+    import parapetai_agent.observation as observation_module
+
+    for var in (govern_module._current_model_span, govern_module._current_tool_span):
+        open_span = var.get()
+        if open_span is not None:
+            open_span.close()
+            var.set(None)
+    # Belt and suspenders: open_span.close() above calls
+    # framework_scope.reset(), which itself tolerates (but may not
+    # SUCCEED at, across a genuine cross-Context mismatch -- see
+    # FrameworkScope.reset()'s own docstring) restoring the prior value.
+    # ContextVar.set() (unlike .reset(token)) has no such restriction, so
+    # this unconditionally clears it for whatever context the NEXT test
+    # runs in, regardless of whether the token-based reset above actually
+    # took effect.
+    observation_module._current_framework.set(None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_otel_module_state() -> Iterator[None]:
     """build_middleware() now calls configure_otel() itself whenever a
     control plane is configured (see maf.py's own docstring on this --

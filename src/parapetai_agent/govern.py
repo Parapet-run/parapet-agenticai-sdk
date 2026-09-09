@@ -36,11 +36,18 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from opentelemetry import context as _otel_context_api
+from opentelemetry import trace as _otel_trace
+
 if TYPE_CHECKING:
     from parapetai_agent.control_plane import Bootstrap, ReviewClient
 
+from parapetai_agent import observation as _observation
 from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequired
 from parapetai_agent.content_checks import ContentCheckConfig
+from parapetai_agent.governance_runtime import (
+    parent_context_from_span_context as _parent_context_from_span_context,
+)
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import Caller
 from parapetai_agent.policy.cost_tracker import CostTracker
@@ -84,6 +91,95 @@ _current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "parapetai_agent_govern_current_span_id", default=None
 )
+
+# auth-integrations.md §10.7: a real OTel span for check_input()/
+# authorize_tool(), same lazy-proxy pattern maf.py's own module-level
+# _tracer already is -- see that module's comment on configure_otel()
+# ordering.
+_tracer = _otel_trace.get_tracer(__name__)
+
+
+class _OpenSpan:
+    """One real OTel span this class opened on a caller's behalf, made
+    AMBIENT (via opentelemetry.context.attach(), not a `with` block) for
+    whatever the CALLER runs next -- Governor has no framework loop and no
+    "wrap this call" API the way MAF/ADK/LangGraph's middleware do
+    (check_input()/authorize_tool() are standalone calls; the real network
+    call a tool makes happens in the embedding application's OWN code,
+    immediately after authorize_tool() returns, not inside anything this
+    class controls). attach() is the low-level OTel mechanism for "make
+    this the current span starting now, until something detaches it" --
+    the same effect a `with start_as_current_span():` block gives other
+    adapters, without requiring one call frame to bracket both open and
+    close.
+
+    Lifecycle (there is no natural "after tool"/"after model call" hook to
+    close this deterministically against, so it closes on whichever comes
+    first):
+      - superseded: the NEXT check_input()/authorize_tool() call in the
+        same trace supersedes the previous one of its own kind -- see
+        _supersede() below, mirroring _current_span_id's own existing
+        "left set until superseded" behavior for the string ids.
+      - trace() exit: Governor.trace()'s `finally` block closes out
+        whatever is still open, so nothing leaks past the trace boundary
+        even if the caller never made a following call.
+
+    A real risk this accepts, matching the SAME risk _current_span_id's
+    own "falls back to a fresh one-off id" comment already documents for
+    cross-call correlation generally: if the embedding application hands
+    the actual tool/model call off to a DIFFERENT thread or a detached
+    asyncio Task before making it, this attached context (like any
+    contextvar-based one) will not be visible there -- out of this
+    class's control either way.
+
+    close() is defensive about a real failure mode confirmed live while
+    building this: `opentelemetry.context.detach()` requires the SAME
+    `contextvars.Context` the corresponding attach() ran in -- calling
+    authorize_tool() through an async wrapper (`Governor.tool`'s own
+    `@gov.tool` decorator) across separate `await` invocations can
+    genuinely land close() in a DIFFERENT context than open() ran in,
+    which raises `ValueError: ... was created in a different Context`.
+    Uncaught, that turns a detection feature into a crash in the
+    CALLER's own tool-call path -- strictly worse than a slightly-stale
+    attachment. `framework_scope.reset()` is separately defensive against
+    this exact failure mode already (see FrameworkScope.reset()'s own
+    docstring in observation.py) -- only the lower-level
+    opentelemetry.context.detach() call below needs its own guard here."""
+
+    __slots__ = ("span", "_context_token", "framework_scope")
+
+    def __init__(self, span: _otel_trace.Span, framework_scope: _observation.FrameworkScope):
+        self.span = span
+        self.framework_scope = framework_scope
+        self._context_token = _otel_context_api.attach(_otel_trace.set_span_in_context(span))
+
+    def close(self) -> None:
+        try:
+            _otel_context_api.detach(self._context_token)
+        except ValueError:
+            pass
+        self.framework_scope.reset()
+        self.span.end()
+
+
+_current_model_span: contextvars.ContextVar[_OpenSpan | None] = contextvars.ContextVar(
+    "parapetai_agent_govern_current_model_span", default=None
+)
+_current_tool_span: contextvars.ContextVar[_OpenSpan | None] = contextvars.ContextVar(
+    "parapetai_agent_govern_current_tool_span", default=None
+)
+
+
+def _supersede(var: contextvars.ContextVar[_OpenSpan | None], new: _OpenSpan) -> None:
+    """Closes whatever _OpenSpan `var` currently holds (if any) before
+    installing `new` -- the span-lifecycle equivalent of _current_span_id's
+    plain `.set()` overwrite, made explicit here because an OTel span (
+    unlike a bare string id) needs an actual close() call to stop leaking
+    its context attachment and to actually get exported."""
+    previous = var.get()
+    if previous is not None:
+        previous.close()
+    var.set(new)
 
 
 class Governor:
@@ -337,6 +433,20 @@ class Governor:
             if trace_id is not None:
                 _cost_tracker.end_trace(trace_id)
             _current_trace_id.reset(token)
+            # auth-integrations.md §10.7: neither check_input()'s model_call
+            # span nor authorize_tool()'s tool_call span has a natural
+            # "after" call to close against (see _OpenSpan's own docstring)
+            # -- the trace boundary is the backstop that guarantees neither
+            # ever leaks past it unclosed, even if the caller's last turn
+            # never made a following call that would have superseded it.
+            open_tool = _current_tool_span.get()
+            if open_tool is not None:
+                open_tool.close()
+                _current_tool_span.set(None)
+            open_model = _current_model_span.get()
+            if open_model is not None:
+                open_model.close()
+                _current_model_span.set(None)
 
     # ------------------------------------------------------------------ #
     # the three decisions
@@ -383,7 +493,21 @@ class Governor:
         span_id = _new_span_id()
         _current_span_id.set(span_id)
         extra = {**extra, **_cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)}
+        # auth-integrations.md §10.7: a real OTel span, ambient for
+        # whatever the caller does next (see _OpenSpan's own docstring for
+        # why this can't be a `with` block here) -- superseded, not
+        # stacked, if a PREVIOUS check_input() in this trace never got
+        # superseded by its own next call (mirrors _current_span_id's
+        # existing plain-overwrite behavior above, made explicit because a
+        # real span needs closing, not just overwriting).
+        model_span = _tracer.start_span("parapetai.model_call")
+        model_scope = _observation.set_current_framework("governor")
+        _supersede(_current_model_span, _OpenSpan(model_span, model_scope))
         result = self._hook.evaluate(snapshot=snap, stage="pre", extra_context=extra or None)
+        if not result.decision.allowed:
+            model_span.set_status(
+                _otel_trace.Status(_otel_trace.StatusCode.ERROR, result.decision.reason)
+            )
         # No args_preview: the "arguments" of a model call are the prompt, and
         # invariant 10 keeps prompt content out of anything the control plane
         # stores unless someone explicitly opts in. The fingerprint still binds
@@ -443,6 +567,7 @@ class Governor:
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
+            framework="governor",
         )
         # COST-TRACK: scope_id is whatever check_input() last set (the
         # triggering model_call's own "turn"), so this tool_call
@@ -454,7 +579,30 @@ class Governor:
         trace_id = _current_trace_id.get() or _new_trace_id()
         span_id = _current_span_id.get() or _new_span_id()
         cost_context = _cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)
+        # auth-integrations.md §10.7: a real OTel span, explicitly parented
+        # to whatever check_input() last opened (if anything -- a Governor
+        # used tool-call-only, per this module's own top-of-file example,
+        # has no model_call span to parent to, and gets a root span
+        # instead, same as an unresolved parent anywhere else in this
+        # codebase). Made ambient via attach(), not a `with` block -- see
+        # _OpenSpan's own docstring for why: the real network call this
+        # tool makes happens in the CALLER's own code, immediately after
+        # this method returns, not inside anything authorize_tool()
+        # controls.
+        preceding_model = _current_model_span.get()
+        tool_span = _tracer.start_span(
+            "parapetai.tool_call",
+            context=_parent_context_from_span_context(
+                preceding_model.span.get_span_context() if preceding_model else None
+            ),
+        )
+        tool_scope = _observation.set_current_framework("governor")
+        _supersede(_current_tool_span, _OpenSpan(tool_span, tool_scope))
         result = self._hook.evaluate(snapshot=snap, stage="pre", extra_context=cost_context)
+        if not result.decision.allowed:
+            tool_span.set_status(
+                _otel_trace.Status(_otel_trace.StatusCode.ERROR, result.decision.reason)
+            )
         # Tool arguments ARE previewable: they are what the policy already
         # matched on, and an approver who cannot see which issue is being
         # closed cannot meaningfully approve closing it.

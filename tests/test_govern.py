@@ -63,6 +63,89 @@ class TestAuthorizeTool:
         assert d.effect == "deny"
 
 
+class TestOtelSpans:
+    """auth-integrations.md §10.7: check_input()/authorize_tool() previously
+    opened no OTel span at all -- Governor had no framework loop to hook a
+    real `with start_as_current_span():` block around, since both are
+    standalone calls (the real tool/model call happens in the CALLER's own
+    code, not inside anything Governor controls). Proven the same way
+    test_maf.py's own OTelCorrelation test proves it for MAF: a real
+    TracerProvider + InMemorySpanExporter, real check_input()/
+    authorize_tool() calls, asserting real spans came out."""
+
+    def test_check_input_and_authorize_tool_open_real_correlated_spans(self) -> None:
+        # All three scenarios share ONE TracerProvider/exporter, cleared
+        # between them with exporter.clear() rather than each getting its
+        # own fresh TracerProvider -- confirmed live that opentelemetry's
+        # own ProxyTracer (what `trace.get_tracer(__name__)` returns, and
+        # what govern.py's module-level `_tracer` is) permanently CACHES
+        # the first real Tracer it resolves against
+        # (`if self._real_tracer: return self._real_tracer`, read directly
+        # from the installed opentelemetry-api source) and never re-checks
+        # `_TRACER_PROVIDER` again -- so a SECOND `set_tracer_provider()`
+        # call later in the same process is silently invisible to an
+        # already-resolved ProxyTracer, even though conftest.py's
+        # `_reset_otel_module_state` correctly resets the global. This is
+        # a real property of upstream OTel, not something to work around
+        # in govern.py itself (a real embedding process only ever sets one
+        # real provider once); it just means a test suite has to keep
+        # provider identity stable across scenarios that share a module's
+        # already-resolved `_tracer`, hence one shared setup below instead
+        # of one fresh TracerProvider per test method.
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        span_exporter = InMemorySpanExporter()
+        tracer_provider = TracerProvider()
+        tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+        otel_trace.set_tracer_provider(tracer_provider)
+
+        # --- Scenario 1: check_input() + authorize_tool() correlate ---
+        gov = _gov()
+        with gov.trace():
+            gov.check_input("What is the status of order A1001?")
+            gov.authorize_tool("lookup_order", {"order_id": "A1001"})
+
+        all_spans = span_exporter.get_finished_spans()
+        model_spans = [s for s in all_spans if s.name == "parapetai.model_call"]
+        tool_spans = [s for s in all_spans if s.name == "parapetai.tool_call"]
+        assert len(model_spans) == 1
+        assert len(tool_spans) == 1
+        # Same-context, single-threaded, no framework executor hop between
+        # check_input() and authorize_tool() here (unlike langgraph.py's
+        # own Pregel-dispatched case) -- real parent correlation IS the
+        # achievable, tested property for Governor's own standalone-call
+        # shape.
+        tool_span = tool_spans[0]
+        assert tool_span.parent is not None
+        assert tool_span.parent.span_id == model_spans[0].context.span_id
+        assert tool_span.context.trace_id == model_spans[0].context.trace_id
+
+        # --- Scenario 2: a denial is reflected on the span's status ---
+        span_exporter.clear()
+        with gov.trace(), pytest.raises(GovernanceDenied):
+            gov.authorize_tool("delete_incident", {"number": "INC1"})
+        (denied_span,) = [
+            s for s in span_exporter.get_finished_spans() if s.name == "parapetai.tool_call"
+        ]
+        assert denied_span.status.status_code == otel_trace.StatusCode.ERROR
+
+        # --- Scenario 3: authorize_tool() alone (no check_input()) gets a
+        # root span -- per this module's own top-of-file example, a
+        # caller that only ever governs tool calls is valid and common;
+        # must not require check_input() first, and must not raise trying
+        # to parent to a model_call span that was never opened. ---
+        span_exporter.clear()
+        with gov.trace():
+            gov.authorize_tool("lookup_order", {"order_id": "A1001"})
+        (root_span,) = [
+            s for s in span_exporter.get_finished_spans() if s.name == "parapetai.tool_call"
+        ]
+        assert root_span.parent is None
+
+
 class TestCheckInput:
     def test_ordinary_prompt_allowed(self) -> None:
         d = _gov().check_input("What is the status of order A1001?")
