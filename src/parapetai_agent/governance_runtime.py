@@ -367,18 +367,33 @@ def enable_automatic_detection(
 
     Deferred imports (not module-level): this module is framework-
     agnostic runtime plumbing every integration imports at its own
-    module-load time, and both corroboration.py and observation.py are
-    independently optional (extras, not base dependencies) -- importing
-    them lazily, only once a control plane is actually configured and
-    this feature isn't disabled, keeps `import parapetai_agent.maf` (etc)
-    free of a hard dependency on either."""
+    module-load time, and corroboration.py/observation.py are
+    independently optional (extras, not base dependencies; observation.py's
+    own MCP-client patch further soft-depends on the `mcp` package
+    specifically, tolerating its absence) -- importing them lazily, only
+    once a control plane is actually configured and this feature isn't
+    disabled, keeps `import parapetai_agent.maf` (etc) free of a hard
+    dependency on any of them.
+
+    Also enables in-process MCP client observation (observation.
+    enable_mcp_observation), sharing this SAME CollectionBudget -- a
+    third capture path alongside corroboration-piggybacked spans, for a
+    tool that is ITSELF an MCP client (agent_framework.MCPTool and
+    equivalents) talking to a remote MCP server directly. See
+    observation.py's own module docstring for why span-based capture
+    structurally cannot see this case (a persistent background task
+    inside the MCP client library detaches the real call from whatever
+    span was ambient) and why patching mcp.client.session.ClientSession
+    directly sidesteps it instead of trying to fix it."""
     if not resolve_observation_capture_enabled(explicit):
         return None
     from parapetai_agent.corroboration import enable_http_corroboration
-    from parapetai_agent.observation import enable_observation_capture
+    from parapetai_agent.observation import enable_mcp_observation, enable_observation_capture
 
     enable_http_corroboration()
-    return enable_observation_capture(agent_id)
+    budget = enable_observation_capture(agent_id)
+    enable_mcp_observation(agent_id, budget)
+    return budget
 
 
 def configure_rotating_audit_log(

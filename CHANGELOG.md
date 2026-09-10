@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0]
+
+### Added
+- **A third automatic-detection capture path, for a tool that is itself
+  an MCP client.** `enable_mcp_observation()` (`parapetai_agent.observation`),
+  auto-wired alongside the other three (`configure_otel`/
+  `enable_http_corroboration`/`enable_observation_capture`) by
+  `build_middleware()`/`build_plugin()`/`Governor.from_control_plane()`.
+  Corroboration's span-based capture assumes a tool's real network call
+  happens synchronously inside its own `parapetai.tool_call` span — that
+  assumption is false for `agent_framework.MCPTool` (and its Stdio/
+  StreamableHTTP/Websocket subclasses) and `google.adk`'s own MCP tool
+  support: both were confirmed, by reading their source, to dispatch a
+  `tools/call` through a persistent background task that owns the MCP
+  session for the tool's whole lifetime, detached from whatever span
+  triggered any given call. Rather than fix that upstream, this patches
+  `mcp.client.session.ClientSession.call_tool`/`initialize` directly —
+  the one layer both integrations were confirmed to funnel every call
+  through regardless of framework, receiving `name`/`arguments` as plain
+  Python values (no JSON-RPC body parsing needed, unlike the gateway's
+  own `MCPParser`). `initialize()`'s response is also used: the remote
+  server's own declared name/website get cached per-session and used as
+  `target`/`destination` for every later `call_tool`. Shares the same
+  `CollectionBudget` and `PARAPETAI_OBSERVATION_CAPTURE` opt-out as the
+  other three. A no-op (never raises) when the `mcp` package isn't
+  installed.
+
 ## [0.12.0]
 
 ### Changed

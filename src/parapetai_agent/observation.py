@@ -55,14 +55,26 @@ alongside the control-plane side.
 from __future__ import annotations
 
 import contextvars
+import functools
 import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
+from opentelemetry import trace as _otel_trace
 
 log = structlog.get_logger(__name__)
+
+# One tracer for this whole module's own span-creating callers
+# (emit_observed_span, and enable_mcp_observation's patched call_tool
+# below) -- same per-instrumentation-scope convention every framework
+# adapter already uses. Safe at import time regardless of whether
+# configure_otel() has run yet: get_tracer() returns a lazy proxy that
+# only resolves against whatever TracerProvider is current at the
+# MOMENT a span is actually started, not at this assignment.
+_tracer = _otel_trace.get_tracer(__name__)
 
 # --------------------------------------------------------------------------
 # Framework identity -- so a child network span can be tagged with which
@@ -490,3 +502,186 @@ def emit_observed_span(
                 span.set_attribute(key, value)
     except Exception:  # noqa: BLE001 -- see this function's own docstring.
         log.warning("observed_span_emit_failed", protocol=observed.protocol, verb=observed.verb)
+
+
+# --------------------------------------------------------------------------
+# In-process MCP client observation. A THIRD capture path, alongside
+# Phase A's span-classified ObservationSpanProcessor and Phase B's
+# gateway-side direct construction -- for the case neither covers: an
+# in-process tool that is ITSELF an MCP client, talking to a remote MCP
+# server directly (no gateway in the path at all). docs/reference/
+# vendor-scope-permission.md documents the finding that made this
+# necessary: agent_framework.MCPTool (and its Stdio/StreamableHTTP/
+# Websocket subclasses) dispatch a tool call through a persistent
+# background "lifecycle owner" asyncio.Task, created once and reused for
+# the tool's whole lifetime -- the real network call for ANY given
+# tools/call therefore runs detached from whatever span/
+# current_framework() was ambient for that specific call, which is
+# exactly why ObservationSpanProcessor's corroboration-piggybacked
+# approach (Phase A) structurally cannot see it: there is no reliable
+# ambient tool_call scope to gate on.
+#
+# The fix sidesteps that problem entirely rather than solving it: instead
+# of inferring a call's shape from span attributes, this patches
+# mcp.client.session.ClientSession.call_tool directly -- the ONE place,
+# confirmed by inspecting both agent_framework's and google-adk's own MCP
+# tool implementations, that EVERY in-process MCP client integration this
+# SDK has verified funnels a `tools/call` request through, regardless of
+# which higher-level framework wrapper (or persistent-task architecture)
+# sits above it. `name`/`arguments` arrive as plain Python values here,
+# before any JSON-RPC serialization even happens -- no body-parsing
+# required, unlike the gateway's own MCPParser (which has to parse wire
+# bytes because it never sees the caller's native call).
+# --------------------------------------------------------------------------
+
+_mcp_active_agent_id: str | None = None
+_mcp_active_budget: CollectionBudget | None = None
+_mcp_original_call_tool: Any | None = None
+_mcp_original_initialize: Any | None = None
+
+
+def _host_from_url(url: str) -> str | None:
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
+
+
+def enable_mcp_observation(
+    agent_id: str, budget: CollectionBudget | None = None
+) -> CollectionBudget | None:
+    """Patches `mcp.client.session.ClientSession` (class-level, so every
+    instance any integration creates is covered -- agent_framework's
+    MCPTool composes one internally, as does google.adk's own MCP tool
+    support; confirmed against both installed packages directly, not
+    assumed) so an in-process MCP client tool call is observed with
+    certainty, the same "already know the shape, no attribute-guessing
+    needed" principle emit_observed_span()/Phase B already use.
+
+    Two methods are wrapped:
+      - `initialize()`: best-effort caches the remote server's own
+        declared `serverInfo.name` (and `websiteUrl`'s host, if given) on
+        the session instance -- the MCP handshake's own vendor-identifying
+        fields, read once per session rather than on every call.
+      - `call_tool(name, arguments, ...)`: emits an ObservedCall built
+        directly from `name`/`arguments` -- no span involved at all for
+        classification (though `current_framework()` is still attached
+        as an OPTIONAL tag, best-effort, when one happens to be
+        ambient) -- before invoking the real call. By the time this method
+        is ever reached, Cedar has already allowed the call: a denial
+        raises inside the framework adapter's own wrap_tool_call/
+        before_tool_callback hook, upstream of wherever a tool's own code
+        (which is what eventually calls `session.call_tool`) ever runs.
+
+    Returns the CollectionBudget in use (the one passed in, shared with
+    whatever called this -- see governance_runtime.enable_automatic_
+    detection(), which passes the SAME budget enable_observation_capture()
+    already returned, so both capture paths honor one saturation state),
+    or None if the `mcp` package isn't installed at all -- not every
+    embedder using this SDK has an MCP tool in their agent, so this must
+    not become a hard dependency or raise when it's absent.
+
+    Idempotent, same "replace the active reference, don't stack a second
+    patch" semantics as enable_observation_capture(): calling again with a
+    different agent_id/budget re-targets the ALREADY-patched methods
+    (module-level state, read fresh on every call_tool invocation) rather
+    than patching twice. A process embedding more than one Bootstrap
+    shares one process-wide patch target the same way it shares one
+    process-wide httpx/grpc instrumentation target via corroboration.py --
+    the last caller's agent_id/budget wins, a pre-existing class of
+    trade-off, not a new one this introduces."""
+    global \
+        _mcp_active_agent_id, \
+        _mcp_active_budget, \
+        _mcp_original_call_tool, \
+        _mcp_original_initialize
+    try:
+        from mcp.client.session import ClientSession
+    except ImportError:
+        log.info("mcp_observation_unavailable", reason="mcp package not installed")
+        return None
+
+    resolved_budget = budget if budget is not None else CollectionBudget()
+    _mcp_active_agent_id = agent_id
+    _mcp_active_budget = resolved_budget
+
+    if _mcp_original_call_tool is not None:
+        log.info("mcp_observation_enabled", agent_id=agent_id)
+        return resolved_budget
+
+    _mcp_original_call_tool = ClientSession.call_tool
+    _mcp_original_initialize = ClientSession.initialize
+    original_call_tool = _mcp_original_call_tool
+    original_initialize = _mcp_original_initialize
+
+    @functools.wraps(original_initialize)
+    async def _patched_initialize(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await original_initialize(self, *args, **kwargs)
+        try:
+            server_info = getattr(result, "serverInfo", None)
+            if server_info is not None:
+                self._parapetai_server_name = getattr(server_info, "name", None)
+                website = getattr(server_info, "websiteUrl", None)
+                self._parapetai_server_host = _host_from_url(website) if website else None
+        except Exception:  # noqa: BLE001 -- never let tagging break a real initialize() call.
+            log.warning("mcp_observation_initialize_tag_failed")
+        return result
+
+    @functools.wraps(original_call_tool)
+    async def _patched_call_tool(
+        self: Any, name: str, arguments: dict[str, Any] | None = None, *args: Any, **kwargs: Any
+    ) -> Any:
+        if _mcp_active_agent_id is not None and _mcp_active_budget is not None:
+            try:
+                observed = ObservedCall(
+                    protocol="mcp",
+                    verb=name,
+                    target=getattr(self, "_parapetai_server_name", None) or "mcp",
+                    destination=getattr(self, "_parapetai_server_host", None),
+                    framework=current_framework(),
+                    args_shape=tuple(sorted(arguments.keys()))
+                    if isinstance(arguments, dict)
+                    else (),
+                )
+                emit_observed_span(
+                    _mcp_active_agent_id, _mcp_active_budget, observed, tracer=_tracer
+                )
+            except Exception:  # noqa: BLE001 -- never let tagging break a real tool call.
+                log.warning("mcp_observation_call_tool_tag_failed", tool_name=name)
+        return await original_call_tool(self, name, arguments, *args, **kwargs)
+
+    ClientSession.initialize = _patched_initialize  # type: ignore[method-assign]
+    ClientSession.call_tool = _patched_call_tool  # type: ignore[method-assign]
+    log.info("mcp_observation_enabled", agent_id=agent_id)
+    return resolved_budget
+
+
+def disable_mcp_observation() -> None:
+    """Reverses enable_mcp_observation() -- real, exported functionality,
+    same reason corroboration.py's own disable_http_corroboration() is:
+    a test suite that reconfigures between cases needs a genuine restore,
+    not just a state flag, since ClientSession.call_tool/initialize are
+    patched at the CLASS level and would otherwise leak into whatever
+    test or process runs next. Safe to call even if nothing was ever
+    enabled."""
+    global \
+        _mcp_active_agent_id, \
+        _mcp_active_budget, \
+        _mcp_original_call_tool, \
+        _mcp_original_initialize
+    if _mcp_original_call_tool is not None:
+        try:
+            from mcp.client.session import ClientSession
+
+            ClientSession.call_tool = _mcp_original_call_tool  # type: ignore[method-assign]
+            ClientSession.initialize = _mcp_original_initialize  # type: ignore[method-assign,assignment]
+        except ImportError:
+            pass
+    _mcp_active_agent_id = None
+    _mcp_active_budget = None
+    _mcp_original_call_tool = None
+    _mcp_original_initialize = None
+
+
+def mcp_observation_enabled() -> bool:
+    return _mcp_original_call_tool is not None
