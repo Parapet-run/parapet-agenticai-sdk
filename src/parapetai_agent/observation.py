@@ -57,6 +57,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import hashlib
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -538,6 +539,7 @@ _mcp_active_agent_id: str | None = None
 _mcp_active_budget: CollectionBudget | None = None
 _mcp_original_call_tool: Any | None = None
 _mcp_original_initialize: Any | None = None
+_mcp_original_list_tools: Any | None = None
 
 
 def _host_from_url(url: str) -> str | None:
@@ -545,6 +547,137 @@ def _host_from_url(url: str) -> str | None:
         return urlparse(url).hostname
     except ValueError:
         return None
+
+
+# --------------------------------------------------------------------------
+# Session-level MCP telemetry: the handshake (initialize) and the server's
+# own tool catalog (list_tools) -- metadata about the CONNECTION, not a
+# specific call, so each gets its own standalone span rather than being
+# shoehorned into ObservedCall's (protocol, verb, target) call-shape model.
+# Deliberately NOT gated by CollectionBudget: that budget exists to cap
+# repeated-call-shape volume for VSP detection sampling (§10.3), a
+# different concern from a handshake that happens once (or a tools/list
+# that happens rarely) per session -- gating here on _mcp_active_agent_id
+# alone (observation enabled at all) is the right granularity.
+#
+# None of these fields are content_bearing under otel/openinference.py's
+# meaning of that word (CLAUDE.md invariant 10): they are the MCP SERVER's
+# own declared, static metadata -- its name/version/capabilities/tool
+# catalog/usage instructions -- never a prompt, a tool argument value, or a
+# model response. Same category openinference.py already puts
+# TOOL_DESCRIPTION in (free text, but server/tool-authored, not user- or
+# model-authored), so these are emitted unconditionally, not gated behind
+# PARAPETAI_OTEL_LOG_CONTENT.
+#
+# These are Parapet-invented attribute names, not part of the OpenInference
+# spec -- deliberately NOT added to otel/openinference.py's ATTRS registry,
+# which is scoped to that external vocabulary specifically (see that
+# module's own docstring). Kept here alongside parapetai.observed.* for the
+# same reason those are: this module already owns its own small attribute
+# namespace for MCP-specific telemetry.
+# --------------------------------------------------------------------------
+
+_MCP_INIT_SPAN_NAME = "parapetai.mcp_session_initialize"
+_MCP_LIST_TOOLS_SPAN_NAME = "parapetai.mcp_list_tools"
+
+# ServerCapabilities' own top-level field names (mcp.types.ServerCapabilities,
+# verified directly against the installed `mcp` package, not assumed) --
+# what the SERVER declared it supports. Distinct from ClientCapabilities
+# (roots/sampling/elicitation): those are computed and SENT by
+# ClientSession.initialize() itself, never stored back onto the session, so
+# they are not recoverable here after the fact without re-deriving
+# SDK-internal logic that could silently drift from a future `mcp` release
+# -- reporting only what the RESULT actually carries is the honest choice.
+_SERVER_CAPABILITY_FIELDS = (
+    "prompts",
+    "resources",
+    "tools",
+    "logging",
+    "completions",
+    "experimental",
+)
+
+
+def _server_capabilities_dict(capabilities: Any) -> dict[str, bool]:
+    """Which top-level ServerCapabilities groups the server declared, as a
+    flat {name: True} map -- booleans, not the sub-objects themselves
+    (each carries provider-specific extras -- e.g. tools.listChanged --
+    with no single stable shape worth committing to here). Read by
+    getattr, defensively, same discipline CLAUDE.md's cedarpy section
+    already applies to a different external library's response shape."""
+    if capabilities is None:
+        return {}
+    return {
+        name: True
+        for name in _SERVER_CAPABILITY_FIELDS
+        if getattr(capabilities, name, None) is not None
+    }
+
+
+def _emit_mcp_initialize_span(session: Any, result: Any) -> None:
+    """The MCP handshake's own vendor-identifying and capability-
+    negotiation fields, as their own standalone span -- protocolVersion,
+    the server's declared capabilities, serverInfo, instructions, and (when
+    the session was constructed with one) our own clientInfo. Never raises:
+    call sites wrap this the same "tagging must not break the real call"
+    way emit_observed_span() already documents for itself.
+
+    Does NOT include the MCP server's URL: mcp.client.session.ClientSession
+    is constructed from raw read/write streams (verified directly against
+    the installed package's __init__ signature), not a URL -- only
+    whatever built the underlying transport (e.g. streamablehttp_client())
+    ever holds that, and this module patches ClientSession itself, not a
+    transport constructor. serverInfo.websiteUrl (already cached as
+    _parapetai_server_host for call_tool's own `destination` field) is the
+    only server-identifying URL-shaped field reachable from here."""
+    server_info = getattr(result, "serverInfo", None)
+    client_info = getattr(session, "_client_info", None)
+    attrs: dict[str, Any] = {
+        "parapetai.mcp.protocol_version": getattr(result, "protocolVersion", None) or "",
+        "parapetai.mcp.server_capabilities": json.dumps(
+            _server_capabilities_dict(getattr(result, "capabilities", None))
+        ),
+    }
+    if server_info is not None:
+        attrs["parapetai.mcp.server_name"] = getattr(server_info, "name", None) or ""
+        attrs["parapetai.mcp.server_version"] = getattr(server_info, "version", None) or ""
+        website = getattr(server_info, "websiteUrl", None)
+        if website:
+            attrs["parapetai.mcp.server_website_url"] = website
+    if client_info is not None:
+        attrs["parapetai.mcp.client_name"] = getattr(client_info, "name", None) or ""
+        attrs["parapetai.mcp.client_version"] = getattr(client_info, "version", None) or ""
+    instructions = getattr(result, "instructions", None)
+    if instructions:
+        attrs["parapetai.mcp.instructions"] = instructions
+    with _tracer.start_as_current_span(_MCP_INIT_SPAN_NAME) as span:
+        for key, value in attrs.items():
+            if value != "":
+                span.set_attribute(key, value)
+
+
+def _emit_mcp_list_tools_span(session: Any, result: Any) -> None:
+    """The server's own tool catalog (name/description/inputSchema per
+    tool) as one span -- field names AND values here, unlike
+    parapetai.observed.*'s args_shape (finding #10's "field names only"
+    convention is about a CALL's arguments, real user/task data; a tool's
+    own declared schema is the server's static metadata, the same category
+    tool.description already sits in). Never raises -- see
+    _emit_mcp_initialize_span's own docstring for why."""
+    tools = getattr(result, "tools", None) or []
+    catalog = [
+        {
+            "name": getattr(tool, "name", None),
+            "description": getattr(tool, "description", None),
+            "input_schema": getattr(tool, "inputSchema", None),
+        }
+        for tool in tools
+    ]
+    with _tracer.start_as_current_span(_MCP_LIST_TOOLS_SPAN_NAME) as span:
+        span.set_attribute(
+            "parapetai.mcp.server_name", getattr(session, "_parapetai_server_name", None) or "mcp"
+        )
+        span.set_attribute("parapetai.mcp.tools", json.dumps(catalog))
 
 
 def enable_mcp_observation(
@@ -558,11 +691,18 @@ def enable_mcp_observation(
     certainty, the same "already know the shape, no attribute-guessing
     needed" principle emit_observed_span()/Phase B already use.
 
-    Two methods are wrapped:
+    Three methods are wrapped:
       - `initialize()`: best-effort caches the remote server's own
         declared `serverInfo.name` (and `websiteUrl`'s host, if given) on
         the session instance -- the MCP handshake's own vendor-identifying
-        fields, read once per session rather than on every call.
+        fields, read once per session rather than on every call -- and
+        emits the full handshake (protocolVersion/capabilities/serverInfo/
+        clientInfo/instructions) as its own span, see
+        _emit_mcp_initialize_span().
+      - `list_tools()`: emits the server's own declared tool catalog
+        (name/description/inputSchema per tool) as its own span, see
+        _emit_mcp_list_tools_span() -- whatever the caller's own code
+        already does with the result is untouched; this only observes it.
       - `call_tool(name, arguments, ...)`: emits an ObservedCall built
         directly from `name`/`arguments` -- no span involved at all for
         classification (though `current_framework()` is still attached
@@ -594,7 +734,8 @@ def enable_mcp_observation(
         _mcp_active_agent_id, \
         _mcp_active_budget, \
         _mcp_original_call_tool, \
-        _mcp_original_initialize
+        _mcp_original_initialize, \
+        _mcp_original_list_tools
     try:
         from mcp.client.session import ClientSession
     except ImportError:
@@ -611,8 +752,10 @@ def enable_mcp_observation(
 
     _mcp_original_call_tool = ClientSession.call_tool
     _mcp_original_initialize = ClientSession.initialize
+    _mcp_original_list_tools = ClientSession.list_tools
     original_call_tool = _mcp_original_call_tool
     original_initialize = _mcp_original_initialize
+    original_list_tools = _mcp_original_list_tools
 
     @functools.wraps(original_initialize)
     async def _patched_initialize(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -623,8 +766,20 @@ def enable_mcp_observation(
                 self._parapetai_server_name = getattr(server_info, "name", None)
                 website = getattr(server_info, "websiteUrl", None)
                 self._parapetai_server_host = _host_from_url(website) if website else None
+            if _mcp_active_agent_id is not None:
+                _emit_mcp_initialize_span(self, result)
         except Exception:  # noqa: BLE001 -- never let tagging break a real initialize() call.
             log.warning("mcp_observation_initialize_tag_failed")
+        return result
+
+    @functools.wraps(original_list_tools)
+    async def _patched_list_tools(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await original_list_tools(self, *args, **kwargs)
+        if _mcp_active_agent_id is not None:
+            try:
+                _emit_mcp_list_tools_span(self, result)
+            except Exception:  # noqa: BLE001 -- never let tagging break a real list_tools() call.
+                log.warning("mcp_observation_list_tools_tag_failed")
         return result
 
     @functools.wraps(original_call_tool)
@@ -652,6 +807,7 @@ def enable_mcp_observation(
 
     ClientSession.initialize = _patched_initialize  # type: ignore[method-assign]
     ClientSession.call_tool = _patched_call_tool  # type: ignore[method-assign]
+    ClientSession.list_tools = _patched_list_tools  # type: ignore[method-assign]
     log.info("mcp_observation_enabled", agent_id=agent_id)
     return resolved_budget
 
@@ -668,19 +824,22 @@ def disable_mcp_observation() -> None:
         _mcp_active_agent_id, \
         _mcp_active_budget, \
         _mcp_original_call_tool, \
-        _mcp_original_initialize
+        _mcp_original_initialize, \
+        _mcp_original_list_tools
     if _mcp_original_call_tool is not None:
         try:
             from mcp.client.session import ClientSession
 
             ClientSession.call_tool = _mcp_original_call_tool  # type: ignore[method-assign]
             ClientSession.initialize = _mcp_original_initialize  # type: ignore[method-assign,assignment]
+            ClientSession.list_tools = _mcp_original_list_tools  # type: ignore[method-assign,assignment]
         except ImportError:
             pass
     _mcp_active_agent_id = None
     _mcp_active_budget = None
     _mcp_original_call_tool = None
     _mcp_original_initialize = None
+    _mcp_original_list_tools = None
 
 
 def mcp_observation_enabled() -> bool:

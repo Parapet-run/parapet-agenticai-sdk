@@ -141,10 +141,31 @@ def decode_jwt_claims(token: str) -> dict[str, Any] | None:
 
 # Standard/Entra claim names for the END USER -- oid/tid (Entra), sub
 # (OIDC standard subject), preferred_username/upn (Entra display name
-# variants), email. Not an exhaustive OIDC claim list by design: these are
-# the ones with a clear, stable identity meaning across the tokens this
+# variants), email, aud. Not an exhaustive OIDC claim list by design: these
+# are the ones with a clear, stable identity meaning across the tokens this
 # repo has actually verified (see docs/maf-in-process-integration.md).
-_END_USER_CLAIM_KEYS = ("oid", "sub", "tid", "preferred_username", "upn", "email")
+#
+# `aud` (audience) is a registered JWT claim (RFC 7519 §4.1.3): the
+# intended recipient(s) of the token, almost always present on a real
+# access token, unlike `resource` below.
+#
+# `resource` is deliberately NOT here, and is NOT extracted from claims by
+# this module at all -- verified directly against RFC 8707 (Resource
+# Indicators for OAuth 2.0) and RFC 9728 (OAuth 2.0 Protected Resource
+# Metadata, which MCP's own spec aligns to per SEP-985): `resource` is a
+# parameter of the AUTHORIZATION/TOKEN REQUEST the CLIENT sends, and the
+# protected resource's own canonical identifier (published at
+# `/.well-known/oauth-protected-resource`), not a claim RFC 7519 defines or
+# a claim any spec guarantees an Authorization Server echoes back into the
+# issued token. The resource server's actual RFC 9728 obligation is to
+# validate the token's `aud` MATCHES its own resource identifier -- which
+# is exactly why `aud` above, not a fabricated `resource` claim lookup, is
+# the correct field to surface here. A caller that already knows which
+# resource (MCP server URL) a call was made against -- observation.py's
+# own target/destination fields on an MCP tool-call observation -- has the
+# real value locally; decoding it out of the token is not a thing RFC 8707
+# makes possible in general.
+_END_USER_CLAIM_KEYS = ("oid", "sub", "tid", "preferred_username", "upn", "email", "aud")
 
 # Claim names checked, in order, for the AGENT/actor's own identity within
 # act -- oid/sub/tid because Entra's act claim (when present) shapes
@@ -152,8 +173,21 @@ _END_USER_CLAIM_KEYS = ("oid", "sub", "tid", "preferred_username", "upn", "email
 _AGENT_CLAIM_KEYS = ("oid", "sub", "tid")
 
 
+def _claim_to_str(value: Any) -> str:
+    """identity_claims is documented (Snapshot.identity_claims's own
+    docstring) as a flat dict of SCALAR attributes -- but RFC 7519 §4.1.3
+    lets `aud` be either a single string OR a JSON array of strings (a
+    token issued for more than one audience). A bare `str(value)` on a
+    list claim would silently produce Python's list repr
+    (`"['a', 'b']"`) instead of a usable value, so array-valued claims are
+    comma-joined here into one real string instead."""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
 def _claims_subset(claims: Mapping[str, Any], keys: Sequence[str]) -> dict[str, str]:
-    return {k: str(claims[k]) for k in keys if claims.get(k) is not None}
+    return {k: _claim_to_str(claims[k]) for k in keys if claims.get(k) is not None}
 
 
 def identity_from_claims(claims: Mapping[str, Any]) -> tuple[dict[str, str], list[str]]:

@@ -12,6 +12,8 @@ correlation test uses, rather than a hand-rolled span stand-in.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -366,6 +368,237 @@ async def test_initialize_caches_server_name_and_website_host_for_later_call_too
     attrs = dict(span.attributes or {})
     assert attrs["parapetai.observed.target"] == "salesforce-mcp-server"
     assert attrs["parapetai.observed.destination"] == "vendor.example"
+
+
+def _mcp_spans_named(name: str):  # type: ignore[no-untyped-def]
+    return [s for s in _MCP_SPAN_EXPORTER.get_finished_spans() if s.name == name]
+
+
+async def test_initialize_emits_a_handshake_span_with_full_detail() -> None:
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    class _ServerInfo:
+        name = "salesforce-mcp"
+        version = "1.4.0"
+        websiteUrl = "https://vendor.example/about"
+
+    class _Capabilities:
+        prompts = object()
+        resources = None
+        tools = object()
+        logging = None
+        completions = None
+        experimental = None
+
+    class _ClientInfo:
+        name = "parapetai-agent"
+        version = "0.13.0"
+
+    class _InitResult:
+        protocolVersion = "2025-06-18"
+        capabilities = _Capabilities()
+        serverInfo = _ServerInfo()
+        instructions = "Use search_records before create_case."
+
+    async def _fake_initialize(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _InitResult()
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-init-1")
+
+    session = _FakeMcpSession()
+    session._client_info = _ClientInfo()
+    await ClientSession.initialize(session)
+
+    (span,) = _mcp_spans_named("parapetai.mcp_session_initialize")
+    attrs = dict(span.attributes or {})
+    assert attrs["parapetai.mcp.protocol_version"] == "2025-06-18"
+    assert json.loads(attrs["parapetai.mcp.server_capabilities"]) == {
+        "prompts": True,
+        "tools": True,
+    }
+    assert attrs["parapetai.mcp.server_name"] == "salesforce-mcp"
+    assert attrs["parapetai.mcp.server_version"] == "1.4.0"
+    assert attrs["parapetai.mcp.server_website_url"] == "https://vendor.example/about"
+    assert attrs["parapetai.mcp.client_name"] == "parapetai-agent"
+    assert attrs["parapetai.mcp.client_version"] == "0.13.0"
+    assert attrs["parapetai.mcp.instructions"] == "Use search_records before create_case."
+
+
+async def test_initialize_handshake_span_omits_absent_optional_fields() -> None:
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    class _InitResult:
+        protocolVersion = "2025-06-18"
+        capabilities = None
+        serverInfo = None
+        instructions = None
+
+    async def _fake_initialize(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _InitResult()
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-init-2")
+
+    await ClientSession.initialize(_FakeMcpSession())
+
+    (span,) = _mcp_spans_named("parapetai.mcp_session_initialize")
+    attrs = dict(span.attributes or {})
+    assert attrs["parapetai.mcp.protocol_version"] == "2025-06-18"
+    assert json.loads(attrs["parapetai.mcp.server_capabilities"]) == {}
+    assert "parapetai.mcp.server_name" not in attrs
+    assert "parapetai.mcp.client_name" not in attrs
+    assert "parapetai.mcp.instructions" not in attrs
+
+
+async def test_initialize_with_real_mcp_types_objects() -> None:
+    """Same handshake span, built from the REAL mcp.types classes rather
+    than lightweight fakes -- proves the getattr-based field reads actually
+    match the installed package's real shape, not just a guessed one."""
+    import mcp.types as t
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    result = t.InitializeResult(
+        protocolVersion="2025-06-18",
+        capabilities=t.ServerCapabilities(tools=t.ToolsCapability()),
+        serverInfo=t.Implementation(name="docs-mcp", version="1.0.0"),
+        instructions="Read-only documentation server.",
+    )
+
+    async def _fake_initialize(self, *a, **k):  # type: ignore[no-untyped-def]
+        return result
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-init-3")
+
+    await ClientSession.initialize(_FakeMcpSession())
+
+    (span,) = _mcp_spans_named("parapetai.mcp_session_initialize")
+    attrs = dict(span.attributes or {})
+    assert attrs["parapetai.mcp.server_name"] == "docs-mcp"
+    assert json.loads(attrs["parapetai.mcp.server_capabilities"]) == {"tools": True}
+
+
+async def test_list_tools_emits_a_tool_catalog_span() -> None:
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    class _Tool:
+        def __init__(self, name, description, input_schema):  # type: ignore[no-untyped-def]
+            self.name = name
+            self.description = description
+            self.inputSchema = input_schema
+
+    class _ListToolsResult:
+        tools = [
+            _Tool("search_records", "Search records.", {"type": "object"}),
+            _Tool("create_case", "Create a case.", {"type": "object"}),
+        ]
+
+    async def _fake_list_tools(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _ListToolsResult()
+
+    ClientSession.list_tools = _fake_list_tools  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-tools-1")
+
+    session = _FakeMcpSession()
+    session._parapetai_server_name = "salesforce-mcp"
+    result = await ClientSession.list_tools(session)
+    assert result.tools[0].name == "search_records"  # real result still returned
+
+    (span,) = _mcp_spans_named("parapetai.mcp_list_tools")
+    attrs = dict(span.attributes or {})
+    assert attrs["parapetai.mcp.server_name"] == "salesforce-mcp"
+    catalog = json.loads(attrs["parapetai.mcp.tools"])
+    assert catalog == [
+        {
+            "name": "search_records",
+            "description": "Search records.",
+            "input_schema": {"type": "object"},
+        },
+        {
+            "name": "create_case",
+            "description": "Create a case.",
+            "input_schema": {"type": "object"},
+        },
+    ]
+
+
+async def test_list_tools_before_initialize_uses_fallback_server_name() -> None:
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    class _ListToolsResult:
+        tools = []
+
+    async def _fake_list_tools(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _ListToolsResult()
+
+    ClientSession.list_tools = _fake_list_tools  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-tools-2")
+
+    await ClientSession.list_tools(_FakeMcpSession())
+
+    (span,) = _mcp_spans_named("parapetai.mcp_list_tools")
+    assert dict(span.attributes or {})["parapetai.mcp.server_name"] == "mcp"
+
+
+async def test_no_active_agent_id_emits_no_session_spans() -> None:
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import disable_mcp_observation, enable_mcp_observation
+
+    class _InitResult:
+        protocolVersion = "x"
+        capabilities = None
+        serverInfo = None
+        instructions = None
+
+    class _ListToolsResult:
+        tools = []
+
+    async def _fake_initialize(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _InitResult()
+
+    async def _fake_list_tools(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _ListToolsResult()
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    ClientSession.list_tools = _fake_list_tools  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-init-4")
+    disable_mcp_observation()  # unpatches AND clears active state
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    ClientSession.list_tools = _fake_list_tools  # type: ignore[method-assign]
+    session = _FakeMcpSession()
+    await ClientSession.initialize(session)
+    await ClientSession.list_tools(session)
+    assert _mcp_spans_named("parapetai.mcp_session_initialize") == []
+    assert _mcp_spans_named("parapetai.mcp_list_tools") == []
+
+
+async def test_disable_mcp_observation_restores_list_tools() -> None:
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import disable_mcp_observation, enable_mcp_observation
+
+    async def _fake_list_tools(self, *a, **k):  # type: ignore[no-untyped-def]
+        return "raw"
+
+    ClientSession.list_tools = _fake_list_tools  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-tools-3")
+    assert ClientSession.list_tools is not _fake_list_tools  # now wrapped
+
+    disable_mcp_observation()
+    assert ClientSession.list_tools is _fake_list_tools  # restored, unwrapped
 
 
 async def test_saturated_mcp_bucket_suppresses_further_emission() -> None:

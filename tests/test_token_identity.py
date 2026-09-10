@@ -66,6 +66,29 @@ class TestIdentityFromClaims:
         _, roles = identity_from_claims({"oid": "x"})
         assert roles == []
 
+    def test_aud_is_extracted_as_a_registered_jwt_claim(self) -> None:
+        end_user_claims, _ = identity_from_claims({"oid": "x", "aud": "api://salesforce-mcp"})
+        assert end_user_claims["aud"] == "api://salesforce-mcp"
+
+    def test_aud_as_a_json_array_is_comma_joined_not_python_repr(self) -> None:
+        # RFC 7519 §4.1.3: aud MAY be a JSON array of strings (a token
+        # issued for more than one audience) -- must not come back as
+        # Python's list repr ("['a', 'b']").
+        end_user_claims, _ = identity_from_claims(
+            {"oid": "x", "aud": ["api://salesforce-mcp", "api://docs-mcp"]}
+        )
+        assert end_user_claims["aud"] == "api://salesforce-mcp, api://docs-mcp"
+
+    def test_resource_is_never_extracted_from_claims(self) -> None:
+        # RFC 8707/RFC 9728: `resource` is a request-time parameter and the
+        # protected resource's own published identifier, not a claim any
+        # spec guarantees is echoed into the token -- this module must not
+        # invent one.
+        end_user_claims, _ = identity_from_claims(
+            {"oid": "x", "resource": "https://mcp.salesforce.internal/v1"}
+        )
+        assert "resource" not in end_user_claims
+
 
 class TestAgentIdentityFromClaims:
     def test_rfc8693_act_claim_wins(self) -> None:

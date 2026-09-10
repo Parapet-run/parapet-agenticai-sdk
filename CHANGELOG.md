@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.14.0]
+
+### Added
+- **`enable_mcp_observation()`'s `initialize()`/`list_tools()` patches now
+  emit real telemetry, not just an in-process cache.** Previously,
+  `initialize()` only cached `serverInfo.name`/`websiteUrl` on the session
+  object to tag later `call_tool` observations, and discarded the rest of
+  the handshake; `list_tools()` wasn't patched at all. Now:
+  - `initialize()` also emits a `parapetai.mcp_session_initialize` span
+    carrying `protocolVersion`, the server's declared `capabilities`
+    (`prompts`/`resources`/`tools`/`logging`/`completions`/`experimental`
+    -- `mcp.types.ServerCapabilities`'s own fields, verified against the
+    installed package), `serverInfo` (name/version/websiteUrl), our own
+    `clientInfo`, and `instructions`.
+  - `list_tools()` emits a `parapetai.mcp_list_tools` span carrying the
+    server's declared tool catalog (name/description/inputSchema per
+    tool).
+
+  Neither is gated behind `PARAPETAI_OTEL_LOG_CONTENT`: this is the MCP
+  server's own static, declared metadata, the same category
+  `otel/openinference.py`'s `TOOL_DESCRIPTION` already sits in, never a
+  prompt, tool argument value, or model response. Note: the MCP server's
+  connection URL itself is still not captured -- `ClientSession` is
+  constructed from raw byte streams, not a URL, so nothing at this layer
+  ever sees it; `serverInfo.websiteUrl` (when the server sets it) is the
+  only server-identifying URL-shaped field reachable here.
+- **`token_identity.py` now extracts the `aud` claim** (RFC 7519 §4.1.3)
+  into `identity_claims`, including correct handling of the array form
+  (comma-joined, not Python's list `repr()`, which a prior bare `str()`
+  would have produced). `resource` is deliberately NOT extracted: per
+  RFC 8707/RFC 9728 it's a request-time parameter and the protected
+  resource's own published identifier, not a claim any spec guarantees a
+  token carries.
+
 ## [0.13.0]
 
 ### Added
