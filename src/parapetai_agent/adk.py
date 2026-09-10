@@ -165,6 +165,9 @@ from parapetai_agent.governance_runtime import (
 from parapetai_agent.governance_runtime import (
     content_check_failure_decision as _content_check_failure_decision,
 )
+from parapetai_agent.governance_runtime import (
+    enable_automatic_detection as _enable_automatic_detection,
+)
 from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
@@ -904,6 +907,7 @@ def build_plugin(
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     trust_session_user_id: bool = False,
     vendor_scoped_resources: bool = False,
+    observation_capture: bool | None = None,
 ) -> ParapetPlugin:
     """One PolicyEngine, one Caller, one ParapetPlugin -- the ADK
     equivalent of parapetai_agent.maf.build_middleware(), same kwarg
@@ -918,6 +922,10 @@ def build_plugin(
     vendor_scoped_resources: see maf.build_middleware()'s own docstring --
     same opt-in, off-by-default flag, same reason (auth-integrations.md
     §3/§8 Q2).
+
+    observation_capture: see maf.build_middleware()'s own docstring --
+    same default-on, PARAPETAI_OBSERVATION_CAPTURE-overridable automatic
+    VendorScopePermission detection (docs/reference/vendor-scope-permission.md).
 
     trust_session_user_id is ADK-specific (MAF has no equivalent, since
     MAF's AgentSession carries no user_id at all): default False, meaning
@@ -1003,6 +1011,13 @@ def build_plugin(
             # picked. Behaviour is unchanged -- see that function's docstring
             # for the persist_policy_dir / in-memory split this used to spell
             # out inline.
+            #
+            # Automatic VendorScopePermission detection -- see
+            # build_plugin()'s own docstring / maf.build_middleware()'s
+            # matching comment at this same point for the full reasoning.
+            observation_budget = _enable_automatic_detection(
+                resolved_agent_id, explicit=observation_capture
+            )
             boot = bootstrap_engine(
                 resolved_control_plane_url,
                 resolved_agent_secret,
@@ -1014,6 +1029,9 @@ def build_plugin(
                 version=_installed_version(),
                 poller_name=f"bundle-poll-{resolved_agent_id}",
                 on_bundle=_load_bundle_configs,
+                on_bundle_meta=(
+                    observation_budget.update_from_bundle_meta if observation_budget else None
+                ),
             )
             engine = boot.engine
             stop_event = boot.stop_event
@@ -1090,6 +1108,10 @@ class GovernedRunner(Runner):
     NOT exposed here until this parameter was added -- same gap as
     GovernedAgent's own (build_plugin() always had it, this wrapper class
     silently didn't forward it) -- see docs/reference/vendor-calls.md.
+
+    observation_capture (default None) -- passed straight through to
+    build_plugin(); see its own docstring and
+    docs/reference/vendor-scope-permission.md.
     """
 
     def __init__(
@@ -1110,6 +1132,7 @@ class GovernedRunner(Runner):
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
         trust_session_user_id: bool = False,
         vendor_scoped_resources: bool = False,
+        observation_capture: bool | None = None,
         **kwargs: Any,
     ) -> None:
         plugin = build_plugin(
@@ -1128,6 +1151,7 @@ class GovernedRunner(Runner):
             alter_transforms=alter_transforms,
             trust_session_user_id=trust_session_user_id,
             vendor_scoped_resources=vendor_scoped_resources,
+            observation_capture=observation_capture,
         )
         app = kwargs.get("app")
         if app is not None:

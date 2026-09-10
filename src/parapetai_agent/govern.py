@@ -45,8 +45,16 @@ if TYPE_CHECKING:
 from parapetai_agent import observation as _observation
 from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequired
 from parapetai_agent.content_checks import ContentCheckConfig
+from parapetai_agent.governance_runtime import configure_otel as _configure_otel
+from parapetai_agent.governance_runtime import (
+    enable_automatic_detection as _enable_automatic_detection,
+)
+from parapetai_agent.governance_runtime import otel_configured as _otel_configured
 from parapetai_agent.governance_runtime import (
     parent_context_from_span_context as _parent_context_from_span_context,
+)
+from parapetai_agent.governance_runtime import (
+    resolve_local_output_settings as _resolve_local_output_settings,
 )
 from parapetai_agent.groundedness import GroundednessConfig
 from parapetai_agent.identity import Caller
@@ -280,6 +288,7 @@ class Governor:
         mode: str = "enforce",
         caller: Caller | None = None,
         on_decision: OnDecision | None = None,
+        observation_capture: bool | None = None,
     ) -> Governor:
         """Govern from CONTROL-PLANE-authored policy, refreshed in the
         background -- the framework-neutral equivalent of what
@@ -312,6 +321,31 @@ class Governor:
         build_middleware, so the same env that configures a MAF agent
         configures this one.
 
+        OpenTelemetry is wired up automatically too, same as
+        build_middleware()/build_plugin() -- unlike those, this
+        constructor previously had no such wiring at all (a real,
+        pre-existing gap: every OTel span this produced needed a caller-
+        supplied configure_otel() call first, with no equivalent kwarg or
+        auto-wiring here to lean on) -- closed now because
+        observation_capture below needs it: automatic detection's spans
+        (both corroboration's and this module's own) go nowhere without a
+        real TracerProvider already registered. console defaults to
+        PARAPETAI_CONSOLE_LOG (same env fallback build_middleware() uses),
+        not this constructor's own kwarg -- there isn't one, since nothing
+        else here writes locally.
+
+        observation_capture (default None -> PARAPETAI_OBSERVATION_CAPTURE,
+        itself default "true"): automatic VendorScopePermission detection
+        (docs/reference/vendor-scope-permission.md) -- watches real
+        network calls a tool makes and lets the control plane classify
+        their vendor/product/resource/permission, no `@declare_vendor_call`
+        required. Enabled automatically since a control plane is always
+        configured here (this constructor raises without one), self-
+        limiting via the control plane's own collection-budget signal
+        delivered over the same bundle-poll channel this constructor
+        already starts a background thread for. Pass False (or
+        PARAPETAI_OBSERVATION_CAPTURE=false) to opt out entirely.
+
         The returned Governor owns a daemon poller thread; call
         `.stop_sync()` to end it (tests, or a process that constructs many).
         """
@@ -331,6 +365,20 @@ class Governor:
                 "Use Governor.from_policy_dir() for local or air-gapped policy."
             )
 
+        if not _otel_configured():
+            # See this method's own docstring's "OpenTelemetry is wired up
+            # automatically too" paragraph -- _otel_configured() is the
+            # same shared, process-wide check build_middleware()/
+            # build_plugin() use, so this yields to an embedder's own
+            # earlier configure_otel() call, or to one of those already
+            # having run in the same process.
+            console, _ = _resolve_local_output_settings(None, None)
+            _configure_otel(
+                otlp_endpoint=os.environ.get("PARAPETAI_OTLP_ENDPOINT") or url,
+                otlp_headers={"Authorization": f"Bearer {secret}"},
+                console=console,
+            )
+
         # Constructed unconditionally, then populated from every fetched
         # bundle -- same contract as build_middleware: an SDK new enough to
         # have these modules enforces whatever config its bundle carries,
@@ -345,6 +393,14 @@ class Governor:
             jd.load_from_bundle(files)
 
         resolved_agent_id = agent_id or os.environ.get("PARAPETAI_AGENT_ID") or "agent"
+        # Automatic VendorScopePermission detection -- see this method's
+        # own docstring's observation_capture paragraph. Must run after
+        # the configure_otel() auto-wiring above and before
+        # bootstrap_engine() below, so the CollectionBudget it returns can
+        # be wired as that call's own on_bundle_meta.
+        observation_budget = _enable_automatic_detection(
+            resolved_agent_id, explicit=observation_capture
+        )
         boot = bootstrap_engine(
             url,
             secret,
@@ -358,6 +414,9 @@ class Governor:
             version=sdk_version(),
             poller_name=f"bundle-poll-{resolved_agent_id}",
             on_bundle=_load_bundle_configs,
+            on_bundle_meta=(
+                observation_budget.update_from_bundle_meta if observation_budget else None
+            ),
         )
         governor = cls(
             boot.engine,

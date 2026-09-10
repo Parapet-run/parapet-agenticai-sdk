@@ -340,13 +340,30 @@ class ObservationSpanProcessor(_SpanProcessorBase):
     they're already present by the time any SpanProcessor's on_start
     fires -- confirmed against the installed opentelemetry-sdk's own
     Span.on_start()) -- this tags a subset of THOSE spans, never creates
-    any of its own."""
+    any of its own.
+
+    Gated on current_framework() being set (i.e. a real span is starting
+    INSIDE some framework's own `with set_current_framework(...):` block
+    around its `parapetai.tool_call` span) -- not just on the span's own
+    attribute shape. Without this gate, corroboration's process-wide httpx
+    instrumentation means ANY http/db/grpc-shaped span gets tagged,
+    including ones this SDK's own infrastructure creates that have
+    nothing to do with a tool calling a vendor -- e.g.
+    control_plane.py's own bundle-poll/heartbeat calls, were those ever
+    NOT already suppressed via control_plane._suppressed_instrumentation()
+    (a second, independent safeguard; this gate is the one that also
+    covers any other non-tool-call caller this process might have, not
+    only that one). A genuine tool call always runs inside the current
+    framework's own tool_call span, so this correctly excludes nothing a
+    real observation is supposed to capture."""
 
     def __init__(self, agent_id: str, budget: CollectionBudget) -> None:
         self._agent_id = agent_id
         self._budget = budget
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:
+        if current_framework() is None:
+            return
         attrs = getattr(span, "attributes", None) or {}
         classified = _classify(attrs)
         if classified is None:

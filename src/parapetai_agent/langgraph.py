@@ -95,6 +95,9 @@ from parapetai_agent.governance_runtime import configure_otel as configure_otel
 from parapetai_agent.governance_runtime import (
     configure_rotating_audit_log as configure_rotating_audit_log,
 )
+from parapetai_agent.governance_runtime import (
+    enable_automatic_detection as _enable_automatic_detection,
+)
 from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
@@ -606,6 +609,7 @@ def build_middleware(
     otel_log_mode: Literal["streaming", "buffered"] = "buffered",
     console: bool | None = None,
     vendor_scoped_resources: bool = False,
+    observation_capture: bool | None = None,
 ) -> ParapetAgentMiddleware:
     """One PolicyEngine, one Caller, one ParapetAgentMiddleware -- the
     LangGraph/LangChain equivalent of `parapetai_agent.maf.build_middleware()`/
@@ -630,7 +634,11 @@ def build_middleware(
 
     vendor_scoped_resources: see maf.build_middleware()'s own docstring --
     same opt-in, off-by-default flag, same reason (auth-integrations.md
-    §3/§8 Q2)."""
+    §3/§8 Q2).
+
+    observation_capture: see maf.build_middleware()'s own docstring --
+    same default-on, PARAPETAI_OBSERVATION_CAPTURE-overridable automatic
+    VendorScopePermission detection (docs/reference/vendor-scope-permission.md)."""
     console, local_log_dir = _resolve_local_output_settings(console, local_log_dir)
     if local_log_dir is not None:
         configure_rotating_audit_log(local_log_dir, console=console)
@@ -674,6 +682,12 @@ def build_middleware(
         poll_thread: threading.Thread | None = None
         if control_plane_configured:
             assert resolved_control_plane_url and resolved_agent_secret  # narrows for mypy
+            # Automatic VendorScopePermission detection -- see
+            # build_middleware()'s own docstring / maf.build_middleware()'s
+            # matching comment at this same point for the full reasoning.
+            observation_budget = _enable_automatic_detection(
+                resolved_agent_id, explicit=observation_capture
+            )
             boot = bootstrap_engine(
                 resolved_control_plane_url,
                 resolved_agent_secret,
@@ -684,6 +698,9 @@ def build_middleware(
                 mode="enforce",
                 version=_installed_version(),
                 poller_name=f"bundle-poll-{resolved_agent_id}",
+                on_bundle_meta=(
+                    observation_budget.update_from_bundle_meta if observation_budget else None
+                ),
             )
             engine = boot.engine
             stop_event = boot.stop_event

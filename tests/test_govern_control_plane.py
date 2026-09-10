@@ -256,3 +256,72 @@ def test_heartbeat_version_reports_this_sdk_not_the_gateway() -> None:
 
     assert sdk_version() == pkg_version("parapetai-agent")
     assert sdk_version() != "0.0.0-dev"
+
+
+# ── OTel + automatic VendorScopePermission detection auto-wiring ─────
+# auth-integrations.md §10.16 Phase B build note: from_control_plane()
+# previously had NO configure_otel() auto-wiring at all -- unlike
+# build_middleware()/build_plugin() -- a real, pre-existing gap closed
+# alongside making automatic detection itself default-on, since the
+# latter's spans need a real TracerProvider already registered to go
+# anywhere.
+
+
+@respx.mock
+def test_configures_otel_and_enables_automatic_detection(tmp_path: Path) -> None:
+    import parapetai_agent.governance_runtime as gr_module
+
+    _mock_control_plane()
+    local = _seed_local(tmp_path / "local")
+
+    assert gr_module._otel_tracer_provider is None
+    gov = Governor.from_control_plane(CP, "secret", policy_dir=local, agent_id="gov-otel-1")
+    try:
+        tp = gr_module._otel_tracer_provider
+        assert tp is not None
+        processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
+        assert "ObservationSpanProcessor" in processor_types
+    finally:
+        gov.stop_sync()
+
+
+@respx.mock
+def test_observation_capture_false_disables_automatic_detection(tmp_path: Path) -> None:
+    import parapetai_agent.governance_runtime as gr_module
+
+    _mock_control_plane()
+    local = _seed_local(tmp_path / "local")
+
+    gov = Governor.from_control_plane(
+        CP, "secret", policy_dir=local, agent_id="gov-otel-2", observation_capture=False
+    )
+    try:
+        # OTel itself is still configured (needed for decision spans
+        # regardless) -- only automatic detection's own two calls are
+        # skipped.
+        tp = gr_module._otel_tracer_provider
+        assert tp is not None
+        processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
+        assert "ObservationSpanProcessor" not in processor_types
+    finally:
+        gov.stop_sync()
+
+
+@respx.mock
+def test_observation_capture_env_var_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import parapetai_agent.governance_runtime as gr_module
+
+    monkeypatch.setenv("PARAPETAI_OBSERVATION_CAPTURE", "false")
+    _mock_control_plane()
+    local = _seed_local(tmp_path / "local")
+
+    gov = Governor.from_control_plane(CP, "secret", policy_dir=local, agent_id="gov-otel-3")
+    try:
+        tp = gr_module._otel_tracer_provider
+        assert tp is not None
+        processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
+        assert "ObservationSpanProcessor" not in processor_types
+    finally:
+        gov.stop_sync()

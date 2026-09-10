@@ -1,6 +1,6 @@
 [project]
 name = "parapetai-gateway"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.12"
 description = "Standalone HTTP-interception PEP (base-URL interception, ADR 0002). Depends on parapetai-agent for the Cedar engine, Snapshot/Caller, and the PEP<->control-plane protocol client -- owns none of them itself."
 license = "MIT"

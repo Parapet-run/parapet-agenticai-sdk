@@ -499,7 +499,12 @@ async def proxy(full_path: str, request: Request) -> Response:
     # either). tool_name is only ever set for a genuine `tools/call`
     # (MCPParser.parse) -- other JSON-RPC methods (initialize, tools/list,
     # ...) carry no tool invocation to observe.
-    if snapshot.provider == "mcp" and snapshot.tool_name and settings.agent_id:
+    if (
+        snapshot.provider == "mcp"
+        and snapshot.tool_name
+        and settings.agent_id
+        and settings.observation_capture
+    ):
         _observe_mcp_call(
             request.app.state.vsp_budget,
             agent_id=settings.agent_id,

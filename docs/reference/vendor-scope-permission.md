@@ -15,51 +15,70 @@ for review, and generating the Cedar grant once accepted are all control
 plane jobs; see [Vendor/product/resource/permission triage](#seeing-it-in-the-control-plane)
 below.
 
-## Two capture paths, one shape
+## Two capture paths, one shape, both fully automatic
 
 | Where | How | Your code |
 |---|---|---|
-| In-process (MAF, ADK, LangGraph, Governor) | Rides on [corroboration](corroboration.md)'s real outbound-call spans; tagged by an `ObservationSpanProcessor` | One extra call — see below |
+| In-process (MAF, ADK, LangGraph, Governor) | Rides on [corroboration](corroboration.md)'s real outbound-call spans; tagged by an `ObservationSpanProcessor` | **None** — auto-wired by `build_middleware()`/`build_plugin()`/`Governor.from_control_plane()` whenever a control plane is configured |
 | Gateway (`parapetai-gateway`, MCP path) | The inbound `tools/call` request the gateway is already proxying **is** the observation — `MCPParser` already extracts `tool_name`/`tool_args` with certainty | **None** — automatic once the gateway has a control plane configured |
 
 Both paths emit the identical wire shape (`parapetai.observed.*` span
 attributes over the same OTLP `/v1/traces` pipe every decision already
 uses), so the control plane's ingestion and triage UI don't care which one
-produced a given bucket.
+produced a given bucket. Neither path requires `configure_otel()`,
+`enable_http_corroboration()`, or `enable_observation_capture()` to be
+called by hand anymore — see below for what's actually happening and how
+to opt out.
 
 ## In-process: MAF, ADK, LangGraph, Governor
 
-Requires [corroboration](corroboration.md) to already be capturing real
-outbound spans — this module only tags a subset of those, it doesn't
-instrument anything itself:
+Nothing to call. The moment a control plane is configured —
+`control_plane_url`/`agent_secret` (arguments, or the
+`PARAPETAI_CONTROL_PLANE_URL`/`PARAPETAI_AGENT_SECRET` env vars) —
+`build_middleware()`/`build_plugin()`/`Governor.from_control_plane()` wire
+up all three of `configure_otel()`, `enable_http_corroboration()`, and
+`enable_observation_capture(agent_id)` for you, in that order, the same
+way they already auto-configured OTel before this existed. This is a
+deliberate design choice, not just a convenience: the whole premise of
+automatic detection (§10.0) is that it requires no manual step from the
+agent author, and the mechanism is inherently self-limiting (see
+"Honoring the collection budget" below) — there's no unbounded standing
+cost that would argue for defaulting it off.
 
 ```python
-from parapetai_agent import configure_otel
-from parapetai_agent.corroboration import enable_http_corroboration
-from parapetai_agent.observation import enable_observation_capture
+from parapetai_agent.maf import build_middleware  # or adk.build_plugin,
+                                                    # langgraph.build_middleware,
+                                                    # Governor.from_control_plane
 
-configure_otel(otlp_endpoint="...")     # 1. real spans have somewhere to go
-enable_http_corroboration()             # 2. real spans get created at all
-enable_observation_capture("agent-42")  # 3. tag the ones worth classifying
+mw = build_middleware(
+    control_plane_url="https://your-control-plane",
+    agent_secret="...",
+    agent_id="agent-42",
+)
+# Detection is already running -- nothing else to call.
 ```
 
-Same ordering rule as `enable_http_corroboration()` (see
-[corroboration.md's own note](corroboration.md#ordering-call-this-after-configure_otel-never-before)):
-call this *after* `configure_otel()`, or every span it ever tags goes to a
-provider nothing exports from. `enable_observation_capture()` registers
-itself on whichever `TracerProvider` is globally current at call time, and
-does not re-check later.
-
-`agent_id` must be the same identity your `control_plane_url`/`agent_secret`
+`agent_id` is the identity `enable_observation_capture()` gets called
+with, and it's exactly the identity your `control_plane_url`/`agent_secret`
 pair authenticates as — the control plane derives the `agent_id` a bucket
 gets stored under from the bearer secret on the OTLP POST, never from a
-span attribute, so a mismatched value here means your local saturation
-checks can never agree with what the server computes.
+span attribute, so this always lines up correctly without you having to
+keep two values in sync yourself.
 
-No further wiring is needed for MAF/ADK/LangGraph/Governor themselves —
-each adapter already tags every `parapetai.tool_call` span it opens with
-its own framework name (`maf`/`adk`/`langgraph`/`governor`), which flows
-onto any observation captured inside that span automatically.
+Each adapter also tags every `parapetai.tool_call` span it opens with its
+own framework name (`maf`/`adk`/`langgraph`/`governor`), which flows onto
+any observation captured inside that span.
+
+### Opting out
+
+Pass `observation_capture=False` (or set `PARAPETAI_OBSERVATION_CAPTURE=false`,
+process-wide) to disable this specific auto-wiring — OTel export for
+decision audit is unaffected either way, since that's independent of
+detection:
+
+```python
+build_middleware(control_plane_url=..., agent_secret=..., observation_capture=False)
+```
 
 ### Honoring the collection budget
 
@@ -67,34 +86,30 @@ The control plane caps how many samples it wants per distinct call shape,
 then tells every PEP to stop enriching that shape once enough exist
 (`observation_collection.saturated_buckets` on the bundle-poll response) —
 this bounds both the OTLP traffic and control-plane storage this feature
-costs. `enable_observation_capture()` returns a `CollectionBudget` you must
-keep updated from that response yourself if you are not using
-`run_bundle_poller()`/`bootstrap_engine()`'s bundled poller with its own
-`on_bundle_meta` hook:
+costs. This is wired automatically too: the `CollectionBudget`
+`enable_observation_capture()` returns is fed as the same background
+bundle-poll thread's `on_bundle_meta` callback, so a server-issued
+saturation (or resume) instruction takes effect on the very next regular
+policy-refresh cycle, with no separate polling channel and nothing extra
+for you to wire.
+
+If you're calling `parapetai_agent.observation`/`corroboration` and
+`control_plane.run_bundle_poller()`/`bootstrap_engine()` directly instead
+of going through one of the four entry points above (e.g. a custom
+integration), `bootstrap_engine()`'s own `on_bundle_meta` parameter now
+reaches every poll cycle of its background thread, not just its one-shot
+synchronous first fetch — wire it the same way:
 
 ```python
-from parapetai_agent.control_plane import run_bundle_poller
+from parapetai_agent.observation import enable_observation_capture
+from parapetai_agent.control_plane import bootstrap_engine
 
-budget = enable_observation_capture("agent-42")
-run_bundle_poller(
-    control_plane_url, agent_secret, policy_dir,
+budget = enable_observation_capture("agent-42")  # after configure_otel()
+boot = bootstrap_engine(
+    control_plane_url, agent_secret, policy_dir=...,
     on_bundle_meta=budget.update_from_bundle_meta,
 )
 ```
-
-**Known gap, not yet closed**: `bootstrap_engine()` (and the
-`build_middleware()`/`build_plugin()`/`Governor.from_control_plane()`
-convenience wrappers built on it) do not yet expose an `on_bundle_meta`
-passthrough for their own background poller thread — only the framework
-adapters' *synchronous* first fetch reads `vendor_scoped_resources` this
-way today. Until that passthrough is added, an app using one of those
-high-level entry points that also wants live saturation updates needs to
-run its own `run_bundle_poller()` call (as above) alongside the one the
-convenience wrapper already starts, rather than relying on a single poller
-for both. Collection still starts and works without this — a bucket simply
-never receives its stop instruction, so it keeps enriching past the
-server's intended cap until the process restarts against a fresh
-`CollectionBudget`. Filed here rather than silently worked around.
 
 ## Gateway: fully automatic on the MCP path
 
@@ -105,11 +120,12 @@ decision audit — every `tools/call` request it proxies that is not blocked
 gets observed automatically, and the collection budget is honored from the
 very same bundle-poll response that already refreshes its Cedar policy.
 
-There is nothing to turn on or off separately; the gateway's `agent_id` for
-this purpose is always `PARAPETAI_AGENT_ID` (the gateway's own registered
-fleet identity — the same reasoning as above: it's what actually
-authenticates the OTLP export), never the unauthenticated per-request
-`/a/{agent_id}` path claim a caller presents.
+Set `PARAPETAI_OBSERVATION_CAPTURE=false` to opt out, same variable as the
+in-process SDK. The gateway's `agent_id` for this purpose is always
+`PARAPETAI_AGENT_ID` (the gateway's own registered fleet identity — the
+same reasoning as above: it's what actually authenticates the OTLP
+export), never the unauthenticated per-request `/a/{agent_id}` path claim
+a caller presents.
 
 ## Seeing it in the control plane
 

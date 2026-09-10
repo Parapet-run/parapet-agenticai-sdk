@@ -22,12 +22,13 @@ hand-edited local file the poller never touched.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import socket
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -36,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
+from opentelemetry import context as _otel_context
 
 from parapetai_agent import pep_identity
 
@@ -52,6 +54,49 @@ log = structlog.get_logger(__name__)
 #: reported a blank mode to the fleet dashboard instead of an explicit one.
 #: auth-integrations.md finding #15.
 DEFAULT_MODE = "enforce"
+
+
+@contextlib.contextmanager
+def _suppressed_instrumentation() -> Iterator[None]:
+    """Wraps every outbound HTTP call THIS module makes to the control
+    plane itself (bundle fetch, heartbeat, key registration, review
+    submit/collect) so corroboration.enable_http_corroboration()'s httpx
+    instrumentor never creates a span for it, and observation.py's
+    ObservationSpanProcessor therefore never has one to (mis)classify as
+    an "observed call" either.
+
+    Why this matters: corroboration instruments httpx PROCESS-WIDE (its
+    own docs: "reaches through arbitrary vendor-SDK wrapping depth, zero
+    awareness of that SDK's existence") -- with no suppression, this
+    module's OWN recurring control-plane traffic (a bundle poll every
+    ~30s, forever, for the life of every control-plane-configured
+    process) would get corroborated and exported like any other tool's
+    real vendor call. Two real consequences, not just noise: (1) it
+    silently defeats the whole point of auth-integrations.md §10.3's
+    collection-budget mechanism -- an unbounded, permanently-recurring
+    "observed call" against this process's own control plane is exactly
+    the standing cost that mechanism exists to prevent, and (2) it
+    pollutes a tenant's real vendor-detection buckets with garbage
+    entries (verb=GET, target=/api/v1/bundle) that were never a tool
+    calling a vendor at all.
+
+    Uses opentelemetry.context's own suppression key directly, not
+    opentelemetry.instrumentation.utils.suppress_instrumentation -- the
+    latter lives in the opentelemetry-instrumentation package, which is
+    only ever installed transitively via the OPTIONAL corroboration
+    extra's own instrumentor packages, and this module (core, no extra)
+    must not gain a hard dependency on it. opentelemetry-api's own
+    `context` module is a base dependency regardless, and every contrib
+    instrumentor's own BaseInstrumentor checks exactly this key before
+    creating a span -- so this is a real no-op, not a guess, when
+    corroboration was never installed or enabled at all."""
+    token = _otel_context.attach(
+        _otel_context.set_value(_otel_context._SUPPRESS_INSTRUMENTATION_KEY, True)
+    )
+    try:
+        yield
+    finally:
+        _otel_context.detach(token)
 
 
 def default_pep_id() -> str:
@@ -83,12 +128,13 @@ def register_public_key(
     plane hiccup during startup doesn't crash the PEP over a security
     UPGRADE it can still operate without."""
     try:
-        response = httpx.post(
-            f"{control_plane_url.rstrip('/')}/api/v1/keys",
-            headers={"Authorization": f"Bearer {agent_secret}"},
-            json={"public_key": pep_identity.public_key_b64(private_key)},
-            timeout=10.0,
-        )
+        with _suppressed_instrumentation():
+            response = httpx.post(
+                f"{control_plane_url.rstrip('/')}/api/v1/keys",
+                headers={"Authorization": f"Bearer {agent_secret}"},
+                json={"public_key": pep_identity.public_key_b64(private_key)},
+                timeout=10.0,
+            )
         if response.status_code != 200:
             log.error(
                 "key_registration_failed",
@@ -162,9 +208,10 @@ def fetch_bundle(
     if private_key is not None:
         headers.update(pep_identity.sign_headers(private_key, "GET", path))
     try:
-        response = httpx.get(
-            f"{control_plane_url.rstrip('/')}{path}", headers=headers, timeout=10.0
-        )
+        with _suppressed_instrumentation():
+            response = httpx.get(
+                f"{control_plane_url.rstrip('/')}{path}", headers=headers, timeout=10.0
+            )
     except httpx.HTTPError as exc:
         raise BundleFetchError(str(exc)) from exc
     if response.status_code == 304:
@@ -329,12 +376,13 @@ def send_heartbeat(
     if private_key is not None:
         headers.update(pep_identity.sign_headers(private_key, "POST", path, body_bytes))
     try:
-        response = httpx.post(
-            f"{control_plane_url.rstrip('/')}{path}",
-            headers=headers,
-            content=body_bytes,
-            timeout=10.0,
-        )
+        with _suppressed_instrumentation():
+            response = httpx.post(
+                f"{control_plane_url.rstrip('/')}{path}",
+                headers=headers,
+                content=body_bytes,
+                timeout=10.0,
+            )
         if response.status_code != 200:
             log.error(
                 "heartbeat_failed", status_code=response.status_code, body=response.text[:200]
@@ -455,12 +503,13 @@ def _post_review(
     if private_key is not None:
         headers.update(pep_identity.sign_headers(private_key, "POST", path, body_bytes))
     try:
-        response = httpx.post(
-            f"{control_plane_url.rstrip('/')}{path}",
-            headers=headers,
-            content=body_bytes,
-            timeout=timeout,
-        )
+        with _suppressed_instrumentation():
+            response = httpx.post(
+                f"{control_plane_url.rstrip('/')}{path}",
+                headers=headers,
+                content=body_bytes,
+                timeout=timeout,
+            )
     except httpx.HTTPError as exc:
         log.error("review_request_failed", path=path, error=str(exc))
         return None
@@ -687,6 +736,7 @@ def bootstrap_engine(
     version: str = "",
     poller_name: str = "bundle-poll",
     on_bundle: Callable[[dict[str, str]], None] | None = None,
+    on_bundle_meta: Callable[[dict[str, Any]], None] | None = None,
     start_poller: bool = True,
 ) -> Bootstrap:
     """Register identity, pull the bundle, start the background poller.
@@ -729,12 +779,36 @@ def bootstrap_engine(
     already constructed its GovernanceHook(vendor_scoped_resources=...)
     from this dataclass's value -- there is no live reference back to
     update.
+
+    on_bundle_meta, unlike on_bundle (which only ever sees the raw file
+    CONTENTS from the bundle, e.g. content_checks.json), is called with
+    the full bundle response dict on every fetch this function makes --
+    both the initial synchronous one AND every later background-poller
+    cycle (previously only the synchronous fetch's OWN internal use of
+    this shape, for vendor_scoped_resources, ever reached that far; a
+    caller-supplied hook only ever reached the synchronous fetch through
+    poll_once() directly, never the ongoing poller this function starts).
+    This is the hook auth-integrations.md §10.3's collection-budget
+    mechanism needs: observation.CollectionBudget.update_from_bundle_meta
+    reads `bundle["observation_collection"]["saturated_buckets"]` off
+    exactly this shape, every cycle, to know when to stop enriching a
+    given call shape -- see governance_runtime.enable_automatic_detection().
     """
     from parapetai_agent.policy.engine import PolicyEngine as _PolicyEngine
 
     resolved_policy_dir = Path(policy_dir)
     resolved_entities = Path(entities_path) if entities_path else None
     bundle_meta: dict[str, Any] = {}
+
+    def _on_bundle_meta(bundle: dict[str, Any]) -> None:
+        # bundle_meta.update is THIS function's own internal use (reading
+        # vendor_scoped_resources back out below); on_bundle_meta is
+        # whatever the caller supplied. Composed into one callback so
+        # both reach every fetch identically, not just the first one --
+        # see this function's own docstring on why that used to differ.
+        bundle_meta.update(bundle)
+        if on_bundle_meta is not None:
+            on_bundle_meta(bundle)
 
     # Ed25519 identity, registered BEFORE the first poll -- the control
     # plane rejects an unknown PEP, so this has to come first.
@@ -753,7 +827,7 @@ def bootstrap_engine(
             None,
             private_key=private_key,
             on_bundle=on_bundle,
-            on_bundle_meta=bundle_meta.update,
+            on_bundle_meta=_on_bundle_meta,
         )
         resolved_policy_dir = Path(persist_policy_dir)
         candidate = resolved_policy_dir / "entities.json"
@@ -771,7 +845,7 @@ def bootstrap_engine(
             private_key=private_key,
             persist_to_disk=False,
             on_bundle=on_bundle,
-            on_bundle_meta=bundle_meta.update,
+            on_bundle_meta=_on_bundle_meta,
         )
 
     vendor_scoped_resources = bool(bundle_meta.get("vendor_scoped_resources", False))
@@ -809,6 +883,7 @@ def bootstrap_engine(
             "key_path": pep_key_path,
             "persist_to_disk": persist_policy_dir is not None,
             "on_bundle": on_bundle,
+            "on_bundle_meta": _on_bundle_meta,
         },
         daemon=True,
         name=poller_name,

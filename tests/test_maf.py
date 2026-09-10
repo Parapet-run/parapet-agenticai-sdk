@@ -2563,7 +2563,11 @@ class TestOtelAutoWiring:
         # console=True's own SimpleSpanProcessor is always present alongside
         # whichever processor log_mode chose for the OTLP exporter -- see
         # configure_otel()'s own "console processor is always simple" note.
-        assert processor_types == {"SimpleSpanProcessor"}
+        # ObservationSpanProcessor is also always present once a control
+        # plane is configured -- automatic VendorScopePermission detection
+        # auto-wires alongside OTel itself (governance_runtime.
+        # enable_automatic_detection), independent of log_mode/console.
+        assert processor_types == {"SimpleSpanProcessor", "ObservationSpanProcessor"}
 
     @respx.mock
     def test_otel_log_mode_defaults_to_buffered(self) -> None:
@@ -2580,7 +2584,13 @@ class TestOtelAutoWiring:
         tp = gr_module._otel_tracer_provider
         assert tp is not None
         processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
-        assert processor_types == {"SimpleSpanProcessor", "BatchSpanProcessor"}
+        # ObservationSpanProcessor: see test_otel_log_mode_streaming_threads_through's
+        # own comment above.
+        assert processor_types == {
+            "SimpleSpanProcessor",
+            "BatchSpanProcessor",
+            "ObservationSpanProcessor",
+        }
 
     @respx.mock
     def test_console_false_disables_the_auto_wired_otel_console_exporter(self) -> None:
@@ -2598,8 +2608,10 @@ class TestOtelAutoWiring:
         assert tp is not None
         processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
         # No ConsoleSpanExporter-backed SimpleSpanProcessor -- only the
-        # OTLP exporter's own (buffered, by default) processor.
-        assert processor_types == {"BatchSpanProcessor"}
+        # OTLP exporter's own (buffered, by default) processor, plus
+        # ObservationSpanProcessor (see test_otel_log_mode_streaming_
+        # threads_through's own comment above -- independent of console).
+        assert processor_types == {"BatchSpanProcessor", "ObservationSpanProcessor"}
 
     @respx.mock
     def test_an_earlier_explicit_configure_otel_call_wins(self) -> None:
@@ -2625,6 +2637,27 @@ class TestOtelAutoWiring:
         # entirely rather than reconfiguring over it.
         assert gr_module._otel_tracer_provider is tp_before
         reset_middleware_registry()  # see the first test's own comment on why
+
+    @respx.mock
+    def test_observation_capture_false_disables_automatic_detection(self) -> None:
+        # auth-integrations.md §10.16 Phase B build note: observation_capture
+        # is the one new knob added alongside making automatic
+        # VendorScopePermission detection default-on -- proves the escape
+        # hatch actually works, not just that the default-on path does.
+        import parapetai_agent.governance_runtime as gr_module
+
+        self._mock_control_plane()
+        build_middleware(
+            agent_id="otel-auto-7",
+            control_plane_url="https://cp.example",
+            agent_secret="the-secret",  # noqa: S106 -- test fixture, not a real credential
+            observation_capture=False,
+        )
+        reset_middleware_registry()  # see the first test's own comment on why
+        tp = gr_module._otel_tracer_provider
+        assert tp is not None
+        processor_types = {type(p).__name__ for p in tp._active_span_processor._span_processors}
+        assert "ObservationSpanProcessor" not in processor_types
 
 
 class TestLocalLogDir:

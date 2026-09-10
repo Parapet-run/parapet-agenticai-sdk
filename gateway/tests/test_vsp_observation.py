@@ -134,6 +134,28 @@ def test_no_agent_id_configured_emits_nothing(monkeypatch: pytest.MonkeyPatch) -
 
 
 @respx.mock
+def test_observation_capture_false_emits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same escape hatch as the in-process SDK's own
+    # governance_runtime.resolve_observation_capture_enabled() --
+    # PARAPETAI_OBSERVATION_CAPTURE=false disables this fleet-wide
+    # regardless of which PEP a deployment uses.
+    respx.post("https://jira-mcp.internal:9000/mcp").mock(
+        return_value=Response(200, json={"jsonrpc": "2.0", "result": {}})
+    )
+    client = _client(
+        monkeypatch,
+        agent_id="gw-fleet-1",
+        mcp_upstreams={"jira": "https://jira-mcp.internal:9000/mcp"},
+        observation_capture=False,
+    )
+
+    resp = client.post("/a/probe/mcp/jira", json=_TOOL_CALL)
+    assert resp.status_code == 200
+
+    assert _observed_spans() == []
+
+
+@respx.mock
 def test_denied_and_enforced_call_emits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     # execute_shell is denied by the fixture policy set -- an enforced deny
     # never reaches upstream, so it must never be observed either: the same

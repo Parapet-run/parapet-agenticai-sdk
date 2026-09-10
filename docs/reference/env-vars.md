@@ -18,6 +18,7 @@ backend.
 | `PARAPETAI_OTEL_LOG_CONTENT` | `"false"` | Opt-in gate for whether OTel spans carry full prompt/response/tool-arg text. The decision audit record itself is **always** content-free regardless of this flag — see [Observability](../OBSERVABILITY.md). |
 | `PARAPETAI_PEP_ID` | `f"pep-{hostname}-{pid}"` | Stable identity of this PEP process on the control plane's fleet dashboard. |
 | `PARAPETAI_PEP_KEY_PATH` | `~/.parapetai/pep_ed25519.key` | Path to the persisted Ed25519 PEP identity private key, generated on first use. Only touched once a control plane is configured. |
+| `PARAPETAI_OBSERVATION_CAPTURE` | `"true"` | Opt-out for [automatic vendor/resource/permission detection](vendor-scope-permission.md) — auto-enabled by `build_middleware()`/`build_plugin()`/`Governor.from_control_plane()` whenever a control plane is configured. Set `false` to disable both corroboration's instrumentation and observation tagging entirely; an explicit `observation_capture=` argument always wins over this. Same variable name and default the gateway also reads. |
 | `PARAPETAI_MODEL_PRICING` | none | JSON object overriding/extending the built-in `$/1M token` price table used for [cumulative cost tracking](cost-tracking.md) (e.g. `{"my-custom-model": {"input": 1.0, "output": 3.0}}`). Malformed JSON is ignored wholesale — falls back to defaults rather than half-applying. Same variable name and shape as the control plane's own retrospective cost-panel rollup, so one override covers both. |
 | `PARAPET_HHEM_MODEL` | `"vectara/hallucination_evaluation_model"` | HuggingFace model id for the in-process HHEM hallucination-evaluation predictor. See [Groundedness (HHEM)](../GROUNDEDNESS_HHEM.md). |
 | `PARAPET_HHEM_URL` | none | If set, call a remote HHEM eval service instead of loading the model in-process. |
@@ -66,6 +67,7 @@ in [`gateway/README.md`](https://github.com/Parapet-run/parapet-agenticai-sdk/tr
 | `PARAPETAI_LOG_LEVEL` | `"info"` | Log level. |
 | `PARAPETAI_CREDENTIAL_MODE` | `"passthrough"` | `passthrough` (forward the caller's own auth header) vs. `broker` (inject a gateway-held provider key). |
 | `PARAPETAI_LOG_PROMPTS` | `"false"` | Whether to log prompt content as a separate, explicit `prompt_content` audit event. Opt-in only. |
+| `PARAPETAI_OBSERVATION_CAPTURE` | `"true"` | Opt-out for automatically observing every proxied `tools/call` for [vendor/resource/permission detection](vendor-scope-permission.md) — on by default whenever `PARAPETAI_AGENT_ID` is set. Same variable name the in-process SDK also reads. |
 | `PARAPETAI_MCP_AUTH_MODE` | `"none"` | `none` vs. `oauth2` for the `/mcp` path. |
 | `PARAPETAI_MCP_OAUTH_SHARED_SECRET` | none | OAuth2 shared secret, gates `/authorize`. **Required** when `PARAPETAI_MCP_AUTH_MODE=oauth2` — the gateway fails closed at startup if it's missing. |
 | `PARAPETAI_MCP_OAUTH_CODE_TTL_S` | `"300"` | OAuth2 authorization code TTL, seconds. |

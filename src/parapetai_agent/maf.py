@@ -226,6 +226,9 @@ from parapetai_agent.governance_runtime import (
 from parapetai_agent.governance_runtime import (
     content_check_failure_decision as _content_check_failure_decision,
 )
+from parapetai_agent.governance_runtime import (
+    enable_automatic_detection as _enable_automatic_detection,
+)
 from parapetai_agent.governance_runtime import flush_otel as flush_otel
 from parapetai_agent.governance_runtime import installed_version as _installed_version
 from parapetai_agent.governance_runtime import otel_configured
@@ -1214,6 +1217,7 @@ def build_middleware(
     console: bool | None = None,
     alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
     vendor_scoped_resources: bool = False,
+    observation_capture: bool | None = None,
 ) -> tuple[ParapetChatMiddleware, ParapetFunctionMiddleware]:
     """One PolicyEngine, one Caller, both middleware -- the pairing this
     module is designed around; register both on the same Agent so
@@ -1419,6 +1423,20 @@ def build_middleware(
     control-plane console is authoritative over whatever a caller
     hardcodes here. Only meaningful as the actual value with no control
     plane configured at all.
+
+    observation_capture (default None -> PARAPETAI_OBSERVATION_CAPTURE,
+    itself default "true"): automatic VendorScopePermission detection
+    (docs/reference/vendor-scope-permission.md) -- watches real network
+    calls a tool makes and lets the control plane classify their vendor/
+    product/resource/permission, no `@declare_vendor_call` required.
+    Wired up automatically, same "once a control plane is configured, so
+    is this" reasoning as OpenTelemetry above: enables both
+    corroboration's real-span capture and this module's own span tagging,
+    self-limiting via the control plane's own collection-budget signal
+    (delivered over the same bundle-poll channel this function already
+    starts a background thread for) -- never an unbounded standing cost.
+    Pass False (or PARAPETAI_OBSERVATION_CAPTURE=false) to opt out
+    entirely.
     """
     console, local_log_dir = _resolve_local_output_settings(console, local_log_dir)
     if local_log_dir is not None:
@@ -1502,6 +1520,18 @@ def build_middleware(
             # picked. Behaviour is unchanged -- see that function's docstring
             # for the persist_policy_dir / in-memory split this used to spell
             # out inline.
+            #
+            # Automatic VendorScopePermission detection -- see this
+            # function's own docstring's observation_capture paragraph.
+            # Must run AFTER configure_otel() above (real TracerProvider
+            # already registered) and BEFORE bootstrap_engine() below, so
+            # the CollectionBudget it returns can be wired as that call's
+            # own on_bundle_meta -- the same bundle-poll cycle that keeps
+            # policy fresh also keeps this budget's saturation state
+            # fresh, with no separate polling channel.
+            observation_budget = _enable_automatic_detection(
+                resolved_agent_id, explicit=observation_capture
+            )
             boot = bootstrap_engine(
                 resolved_control_plane_url,
                 resolved_agent_secret,
@@ -1513,6 +1543,9 @@ def build_middleware(
                 version=_installed_version(),
                 poller_name=f"bundle-poll-{resolved_agent_id}",
                 on_bundle=_load_bundle_configs,
+                on_bundle_meta=(
+                    observation_budget.update_from_bundle_meta if observation_budget else None
+                ),
             )
             engine = boot.engine
             stop_event = boot.stop_event
@@ -1623,6 +1656,10 @@ class GovernedAgent(Agent):
     had it, this wrapper class silently didn't forward it, so there was no
     way to turn it on for a GovernedAgent with no control plane
     configured -- see docs/reference/vendor-calls.md).
+
+    observation_capture (default None) -- passed straight through to
+    build_middleware(); see its own docstring and
+    docs/reference/vendor-scope-permission.md.
     """
 
     def __init__(
@@ -1642,6 +1679,7 @@ class GovernedAgent(Agent):
         console: bool | None = None,
         alter_transforms: Mapping[str, Callable[[Any], Any]] | None = None,
         vendor_scoped_resources: bool = False,
+        observation_capture: bool | None = None,
         **kwargs: Any,
     ) -> None:
         chat_mw, func_mw = build_middleware(
@@ -1659,6 +1697,7 @@ class GovernedAgent(Agent):
             console=console,
             alter_transforms=alter_transforms,
             vendor_scoped_resources=vendor_scoped_resources,
+            observation_capture=observation_capture,
         )
         extra_middleware = kwargs.get("middleware") or []
         kwargs["middleware"] = [chat_mw, func_mw, *extra_middleware]

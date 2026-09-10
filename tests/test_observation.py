@@ -158,10 +158,13 @@ def test_observation_span_processor_does_not_tag_a_saturated_bucket() -> None:
     provider.add_span_processor(ObservationSpanProcessor("agent-1", budget))
     tracer = provider.get_tracer(__name__)
 
-    with tracer.start_as_current_span(
-        "GET", attributes={"http.request.method": "GET", "url.path": "/sobjects/Case"}
-    ):
-        pass
+    # Inside a tool_call scope -- proves saturation is what suppressed
+    # this, not the (separately tested) framework gate below.
+    with set_current_framework("maf"):
+        with tracer.start_as_current_span(
+            "GET", attributes={"http.request.method": "GET", "url.path": "/sobjects/Case"}
+        ):
+            pass
 
     (span,) = exporter.get_finished_spans()
     assert span.attributes is not None
@@ -175,7 +178,37 @@ def test_observation_span_processor_ignores_an_unrelated_span() -> None:
     provider.add_span_processor(ObservationSpanProcessor("agent-1", CollectionBudget()))
     tracer = provider.get_tracer(__name__)
 
-    with tracer.start_as_current_span("parapetai.tool_call"):
+    # Inside a tool_call scope -- proves _classify() finding no matching
+    # semconv attrs is what suppressed this, not the framework gate below.
+    with set_current_framework("maf"):
+        with tracer.start_as_current_span("parapetai.tool_call"):
+            pass
+
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes is not None
+    assert "parapetai.observed" not in span.attributes
+
+
+def test_observation_span_processor_ignores_a_span_outside_any_tool_call_scope() -> None:
+    # auth-integrations.md §10.16 Phase B build note: without this gate,
+    # corroboration's process-wide httpx instrumentation means ANY
+    # http/db/grpc-shaped span gets tagged -- including this SDK's own
+    # infrastructure calls (bundle poll, heartbeat), which run with no
+    # framework's tool_call span active at all. A real, well-formed
+    # http-shaped span must still be ignored here even though every
+    # attribute _classify() looks for is present and the bucket is
+    # nowhere near saturated -- current_framework() being unset is by
+    # itself sufficient reason to skip.
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    provider.add_span_processor(ObservationSpanProcessor("agent-1", CollectionBudget()))
+    tracer = provider.get_tracer(__name__)
+
+    assert current_framework() is None
+    with tracer.start_as_current_span(
+        "GET", attributes={"http.request.method": "GET", "url.path": "/api/v1/bundle"}
+    ):
         pass
 
     (span,) = exporter.get_finished_spans()

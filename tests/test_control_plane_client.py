@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import respx
@@ -445,3 +446,130 @@ def test_bootstrap_engine_defaults_vendor_scoped_resources_false_when_absent(
     )
 
     assert boot.vendor_scoped_resources is False
+
+
+@respx.mock
+def test_bootstrap_engine_on_bundle_meta_reaches_the_background_poller(tmp_path: Path) -> None:
+    """Closes a real, previously-shipped gap: bootstrap_engine()'s own
+    background poller thread never accepted a caller-supplied
+    on_bundle_meta at all -- only the synchronous first fetch's internal
+    use of this shape (reading vendor_scoped_resources back out) ever
+    reached that far. A caller wiring observation.CollectionBudget.
+    update_from_bundle_meta here needs a server-issued saturation/resume
+    instruction to keep arriving on every later poll cycle, not just once
+    at bootstrap -- auth-integrations.md §10.3/§10.17."""
+    respx.post(f"{CONTROL_PLANE_URL}/api/v1/keys").mock(
+        return_value=Response(200, json={"status": "ok"})
+    )
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(
+        return_value=Response(
+            200,
+            json={
+                "agent_id": "pa-1",
+                "digest": "d1",
+                "observation_collection": {"saturated_buckets": ["ob-xyz"]},
+                "files": {"00-base.cedar": "permit (principal, action, resource);"},
+            },
+        )
+    )
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    (policy_dir / "00-base.cedar").write_text("permit (principal, action, resource);")
+
+    seen: list[dict[str, object]] = []
+
+    def _record(bundle: dict[str, object]) -> None:
+        seen.append(bundle)
+
+    respx.post(f"{CONTROL_PLANE_URL}/api/v1/fleet/heartbeat").mock(
+        return_value=Response(200, json={"status": "ok"})
+    )
+
+    # bootstrap_engine() sends one heartbeat and one poll_once() itself,
+    # synchronously, before ever starting the background thread -- so
+    # `seen` already has one entry by the time it returns. Poll for the
+    # thread's own first background cycle to add a second, rather than
+    # racing a stop_event against a fixed sleep -- interval_s isn't
+    # exposed on bootstrap_engine() at all, so the loop's first cycle
+    # fires as soon as the thread schedules, with no fixed delay to wait
+    # out; poll_once() runs at the very top of its loop body (before any
+    # sleep) each cycle.
+    boot = bootstrap_engine(
+        CONTROL_PLANE_URL,
+        "the-secret",
+        policy_dir=policy_dir,
+        pep_key_path=tmp_path / "pep-key.json",
+        on_bundle_meta=_record,
+    )
+    deadline = time.monotonic() + 5.0
+    while len(seen) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert boot.stop_event is not None
+    boot.stop_event.set()
+    assert boot.thread is not None
+    boot.thread.join(timeout=5.0)
+
+    assert len(seen) == 2
+    assert all(b["observation_collection"] == {"saturated_buckets": ["ob-xyz"]} for b in seen)
+
+
+def test_suppressed_instrumentation_sets_and_clears_the_context_key() -> None:
+    """auth-integrations.md §10.16 Phase B build note: this module's own
+    control-plane HTTP calls must never be corroborated/observed as if
+    they were a tool's real vendor call -- see _suppressed_instrumentation's
+    own docstring. Proven at the OTel-context level directly, deliberately
+    NOT by enabling real corroboration.enable_http_corroboration() in this
+    (shared, in-process) pytest run -- test_corroboration.py's own module
+    docstring documents that doing so, even with disable_ called
+    afterward, has left this exact shared process in a state where a
+    LATER test elsewhere stops recording spans; that correctness proof
+    already lives in a subprocess-isolated test there. What matters here
+    is only that this function sets and clears the exact key any contrib
+    instrumentor checks -- a pure opentelemetry-api mechanism with no
+    instrumentor involved at all."""
+    from opentelemetry import context as otel_context
+
+    from parapetai_agent.control_plane import _suppressed_instrumentation
+
+    assert otel_context.get_value(otel_context._SUPPRESS_INSTRUMENTATION_KEY) is not True
+    with _suppressed_instrumentation():
+        assert otel_context.get_value(otel_context._SUPPRESS_INSTRUMENTATION_KEY) is True
+    assert otel_context.get_value(otel_context._SUPPRESS_INSTRUMENTATION_KEY) is not True
+
+
+@respx.mock
+def test_fetch_bundle_suppresses_instrumentation_around_its_own_http_call() -> None:
+    """Proves the WIRING (fetch_bundle actually uses
+    _suppressed_instrumentation, not just that the helper works in
+    isolation) via a spy, same reasoning as the test above for why this
+    doesn't enable real corroboration."""
+    import parapetai_agent.control_plane as cp_module
+
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(
+        return_value=Response(
+            200,
+            json={
+                "agent_id": "pa-1",
+                "digest": "d1",
+                "files": {"00-base.cedar": "permit (principal, action, resource);"},
+            },
+        )
+    )
+    import contextlib
+
+    calls: list[str] = []
+    real = cp_module._suppressed_instrumentation
+
+    @contextlib.contextmanager
+    def _spy():  # type: ignore[no-untyped-def]
+        calls.append("suppressed")
+        with real():
+            yield
+
+    cp_module._suppressed_instrumentation = _spy  # type: ignore[assignment]
+    try:
+        fetch_bundle(CONTROL_PLANE_URL, "the-secret")
+    finally:
+        cp_module._suppressed_instrumentation = real
+
+    assert calls == ["suppressed"]

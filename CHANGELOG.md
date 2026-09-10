@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0]
+
+### Changed
+- **Automatic vendor/resource/permission detection (0.11.0) is now ON BY
+  DEFAULT**, not a three-call manual opt-in. `build_middleware()`
+  (MAF/LangGraph), `build_plugin()` (ADK), and `Governor.from_control_plane()`
+  now call `configure_otel()`, `corroboration.enable_http_corroboration()`,
+  and `observation.enable_observation_capture()` for you, in that order,
+  the moment a control plane is configured — matching the feature's own
+  design premise (auth-integrations.md §10.0: no manual step required)
+  and the fact that it's inherently self-limiting via the control plane's
+  own collection-budget signal, not an unbounded standing cost. New
+  `observation_capture: bool | None = None` parameter (env fallback
+  `PARAPETAI_OBSERVATION_CAPTURE`, default `true`) on all four entry
+  points opts out. `Governor.from_control_plane()` previously had **no**
+  `configure_otel()` auto-wiring at all (a real, separate pre-existing
+  gap, unlike the other three) — closed here too, since automatic
+  detection needs it working to go anywhere.
+- **Gateway (`parapetai-gateway`)**: Phase B's MCP-path observation
+  capture (0.11.0) is likewise unconditional-by-default and now respects
+  the same `PARAPETAI_OBSERVATION_CAPTURE` env var (new `Settings.
+  observation_capture` field, default `true`) to opt out fleet-wide.
+- **`control_plane.bootstrap_engine()`'s `on_bundle_meta` now reaches
+  every cycle of its own background poller thread**, not just its
+  one-shot synchronous first fetch — closes the gap 0.11.0's own docs
+  flagged as known-but-unfixed. A caller wiring
+  `CollectionBudget.update_from_bundle_meta` through one of the four
+  high-level entry points above no longer needs a second, manual
+  `run_bundle_poller()` call to get live saturation updates.
+
+### Fixed
+- **`observation.ObservationSpanProcessor` no longer misclassifies this
+  SDK's own control-plane traffic as an observed vendor call.** Real bug,
+  found making detection default-on: `enable_http_corroboration()`
+  instruments httpx process-wide, with no awareness of what called it —
+  without a fix, every bundle-poll/heartbeat/key-registration request
+  this SDK makes to its OWN control plane would get corroborated and
+  potentially tagged as an "observed call" too. Two independent fixes,
+  not one: (1) `ObservationSpanProcessor.on_start()` now only tags a span
+  started while `current_framework()` is set (i.e. genuinely inside some
+  framework's own tool_call scope) — this SDK's own infrastructure calls
+  never run inside one; (2) `control_plane.py`'s own outbound HTTP calls
+  (bundle fetch, heartbeat, key registration, review submit/collect) now
+  wrap themselves in a new `_suppressed_instrumentation()` helper, using
+  `opentelemetry.context`'s own suppress-instrumentation key directly, so
+  corroboration's instrumentor never creates a span for them at all —
+  belt and suspenders, since (1) alone only stops misclassification, not
+  the extra OTLP export traffic/cost (1) alone would still generate for
+  every recurring poll cycle, forever, for every control-plane-configured
+  process.
+
 ## [0.11.0]
 
 ### Added

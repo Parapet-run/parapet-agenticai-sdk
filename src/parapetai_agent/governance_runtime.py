@@ -35,7 +35,7 @@ import logging.handlers
 import os
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from opentelemetry import trace
@@ -52,6 +52,9 @@ from parapetai_agent._exceptions import GovernanceDenied as GovernanceDenied
 from parapetai_agent.policy.engine import Decision
 from parapetai_agent.policy.hooks import content_free
 from parapetai_agent.providers.parsers import Snapshot
+
+if TYPE_CHECKING:
+    from parapetai_agent.observation import CollectionBudget
 
 log = structlog.get_logger(__name__)
 
@@ -305,6 +308,77 @@ def resolve_local_output_settings(
     )
     resolved_local_log_dir = local_log_dir or os.environ.get("PARAPETAI_LOCAL_LOG_DIR") or None
     return resolved_console, resolved_local_log_dir
+
+
+def resolve_observation_capture_enabled(explicit: bool | None) -> bool:
+    """Same explicit-arg-then-env-var-then-default shape as
+    resolve_local_output_settings() above, for the one knob every
+    control-plane-aware entry point (build_middleware()/build_plugin()/
+    Governor.from_control_plane()) now shares for automatic
+    VendorScopePermission detection (auth-integrations.md §10). Defaults
+    to enabled -- unlike console/local_log_dir (which default OFF because
+    they're either noisy or write to disk), this one is deliberately
+    default ON, matching this feature's own design premise: detection is
+    supposed to require no manual step, and it is inherently self-limiting
+    (the control plane caps sample count per call shape and instructs
+    every PEP to stop once saturated, auth-integrations.md §10.3) rather
+    than an unbounded standing cost that would justify defaulting to off.
+    PARAPETAI_OBSERVATION_CAPTURE=false is the escape hatch for a customer
+    who wants neither the corroboration instrumentation's patching of
+    their process's HTTP/gRPC libraries nor the extra spans it produces,
+    for any reason (compliance posture, perf-sensitivity, or simply not
+    wanting it) -- same class of off-switch PARAPETAI_CREDENTIAL_MODE/
+    PARAPETAI_LOG_PROMPTS already give for their own opt-out cases."""
+    return (
+        explicit
+        if explicit is not None
+        else os.environ.get("PARAPETAI_OBSERVATION_CAPTURE", "true").strip().lower() == "true"
+    )
+
+
+def enable_automatic_detection(
+    agent_id: str, *, explicit: bool | None = None
+) -> CollectionBudget | None:
+    """Turns on BOTH halves of automatic VendorScopePermission detection
+    in one call -- corroboration.enable_http_corroboration() (the real
+    outbound spans) and observation.enable_observation_capture() (tags a
+    subset of them) -- gated by resolve_observation_capture_enabled()
+    above. Returns the CollectionBudget to wire as
+    control_plane.bootstrap_engine()'s own on_bundle_meta= parameter, or
+    None if disabled, so a caller can pass this straight through without
+    an extra branch:
+
+        budget = enable_automatic_detection(resolved_agent_id)
+        boot = bootstrap_engine(
+            ...,
+            on_bundle_meta=budget.update_from_bundle_meta if budget else None,
+        )
+
+    MUST be called after configure_otel() (or whatever else registers the
+    real TracerProvider) has already run -- same ordering requirement
+    corroboration.py's own enable_http_corroboration() documents
+    prominently, since both instrumentors and this module's own
+    ObservationSpanProcessor resolve/register against whatever provider
+    is globally current AT CALL TIME. Every caller of this function
+    already establishes that ordering (auto-wiring configure_otel() first
+    in the same `if control_plane_configured` block this lives in), so
+    this doesn't re-check it itself -- see corroboration.py's Ordering
+    section for what happens if that's ever violated.
+
+    Deferred imports (not module-level): this module is framework-
+    agnostic runtime plumbing every integration imports at its own
+    module-load time, and both corroboration.py and observation.py are
+    independently optional (extras, not base dependencies) -- importing
+    them lazily, only once a control plane is actually configured and
+    this feature isn't disabled, keeps `import parapetai_agent.maf` (etc)
+    free of a hard dependency on either."""
+    if not resolve_observation_capture_enabled(explicit):
+        return None
+    from parapetai_agent.corroboration import enable_http_corroboration
+    from parapetai_agent.observation import enable_observation_capture
+
+    enable_http_corroboration()
+    return enable_observation_capture(agent_id)
 
 
 def configure_rotating_audit_log(

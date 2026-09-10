@@ -125,6 +125,17 @@ class Settings:
     log_prompts: bool = field(
         default_factory=lambda: os.getenv("PARAPETAI_LOG_PROMPTS", "false").lower() == "true"
     )
+    # On by default -- unlike log_prompts above, this carries no content,
+    # just a call's shape (verb/target/destination), and the whole point
+    # of auth-integrations.md §10.0's design is that it requires no manual
+    # step. Same variable name as the in-process SDK's own
+    # governance_runtime.resolve_observation_capture_enabled() opt-out, so
+    # one setting disables automatic VendorScopePermission detection
+    # fleet-wide regardless of which PEP a given deployment uses. See
+    # docs/reference/vendor-scope-permission.md.
+    observation_capture: bool = field(
+        default_factory=lambda: os.getenv("PARAPETAI_OBSERVATION_CAPTURE", "true").lower() == "true"
+    )
     # "none" (default): the /mcp path is reachable with no bearer credential at
     # all -- today's behaviour, unchanged. Cedar is still the real gate either
     # way (agent_id is an unverified path claim regardless of this setting,
