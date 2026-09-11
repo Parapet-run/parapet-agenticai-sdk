@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.14.1]
+
+### Added
+- **Real MCP server URL now captured.** `0.14.0`'s note above ("the MCP
+  server's connection URL itself is still not captured") no longer
+  applies: `enable_mcp_observation()` now also patches the MCP transport
+  connectors (`mcp.client.sse.sse_client`, `mcp.client.streamable_http.
+  streamablehttp_client`/`streamable_http_client`, `mcp.client.websocket.
+  websocket_client`) via a `ContextVar`, since `ClientSession` itself
+  still never sees the URL -- only whatever built the underlying
+  transport does. Emits `parapetai.mcp.server_url` on the handshake span
+  alongside the existing `server_website_url`, and uses it (ground truth)
+  ahead of the server's self-declared `websiteUrl` for the cached
+  destination host `call_tool` observations use.
+- **`token_identity.py` claim extraction expanded to the full RFC 7519 +
+  OIDC Core + RFC 9068 vocabulary**: `iss`/`exp`/`iat`/`nbf`/`jti` (RFC
+  7519 registered claims), `name`/`given_name`/`family_name`/`azp`/`amr`
+  (OIDC Core §5.1/§2), `client_id`/`scope`/`entitlements` (RFC 9068
+  §2.2/§2.2.3). Fixes two real gaps: `scp`/`scope` were never extracted
+  at all despite being read downstream, and `agent_identity_from_claims()`
+  never checked `client_id` (RFC 9068 §2.2's own REQUIRED claim for a
+  JWT-formatted OAuth access token) -- only `act`/`azp`/`appid` -- so a
+  spec-compliant access token's agent identity was silently missed.
+- **`Snapshot.agent_identity_claims`**: the delegated agent/actor's own
+  claims, previously discarded once used to resolve the Cedar principal
+  string. Threaded through `scoped_data.effective_agent_identity_claims()`
+  and every MAF/ADK/LangGraph adapter call site, plus `Governor.
+  check_input()`/`authorize_tool()`/`check_output()`'s new `agent_claims=`
+  kwarg.
+- **`BackgroundOpaqueTokenResolver` + `Rfc7662Introspector`/
+  `OidcUserInfoIntrospector`**: resolves an opaque (non-JWT) bearer
+  token's claims off the request path -- a decision only ever reads an
+  in-memory cache (synchronous, always fast); a daemon thread does the
+  real RFC 7662 introspection or OIDC UserInfo HTTP call in the
+  background, the same architecture `control_plane.py`'s own bundle
+  poller already uses. Opt-in via `JwtIdentityExtractor(opaque_resolver=
+  ...)`.
+
 ## [0.14.0]
 
 ### Added
