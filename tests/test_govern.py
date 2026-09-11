@@ -152,6 +152,78 @@ class TestCheckInput:
         assert d.allowed is True
 
 
+def _gov_capturing() -> tuple[Governor, list[dict[str, Any]]]:
+    contexts: list[dict[str, Any]] = []
+
+    def _capture(
+        decision: Decision,
+        principal: str,
+        snapshot: Snapshot,
+        resource: str,
+        context: Mapping[str, Any],
+    ) -> None:
+        contexts.append(dict(context))
+
+    return (
+        Governor.from_policy_dir(POLICIES, POLICIES / "entities.json", on_decision=_capture),
+        contexts,
+    )
+
+
+class TestAgentIdentityClaims:
+    """agent_claims is distinct from claims (the end user's) -- both must
+    reach the decision context separately, on all three of check_input()/
+    authorize_tool()/check_output(), not just whichever one was fixed
+    first."""
+
+    def test_check_input_carries_both_end_user_and_agent_claims(self) -> None:
+        gov, contexts = _gov_capturing()
+        gov.check_input(
+            "hello",
+            claims={"oid": "user-42"},
+            agent_claims={"sub": "agent-sp-1", "iss": "https://agent-idp.example"},
+        )
+        assert contexts[-1]["identity_claims"] == {"oid": "user-42"}
+        assert contexts[-1]["agent_identity_claims"] == {
+            "sub": "agent-sp-1",
+            "iss": "https://agent-idp.example",
+        }
+
+    def test_authorize_tool_carries_agent_claims(self) -> None:
+        # raise_on_deny=False: the shipped policies/ bundle's own role gate
+        # (policies/30-identity.cedar) may deny lookup_order for an
+        # identity_claims.oid with no matching role -- irrelevant to this
+        # test, which only checks that agent_identity_claims reached the
+        # context on_decision sees, not the allow/deny outcome itself.
+        gov, contexts = _gov_capturing()
+        gov.authorize_tool(
+            "lookup_order",
+            {"order_id": "A1001"},
+            claims={"oid": "user-42"},
+            agent_claims={"client_id": "agent-app-id"},
+            raise_on_deny=False,
+        )
+        assert contexts[-1]["agent_identity_claims"] == {"client_id": "agent-app-id"}
+
+    def test_check_output_carries_agent_claims(self) -> None:
+        gov, contexts = _gov_capturing()
+        gov.check_output(
+            "order shipped",
+            claims={"oid": "user-42"},
+            agent_claims={"sub": "agent-sp-1"},
+        )
+        assert contexts[-1]["agent_identity_claims"] == {"sub": "agent-sp-1"}
+
+    def test_absent_agent_claims_omits_the_key_entirely(self) -> None:
+        # Snapshot.to_context() only adds agent_identity_claims `if
+        # self.agent_identity_claims:` -- an empty dict must not appear as
+        # a present-but-empty key (same has-check reasoning identity_claims
+        # itself already documents).
+        gov, contexts = _gov_capturing()
+        gov.check_input("hello", claims={"oid": "user-42"})
+        assert "agent_identity_claims" not in contexts[-1]
+
+
 class TestToolDecorator:
     def test_decorator_blocks_denied_tool_before_it_runs(self) -> None:
         gov = _gov()

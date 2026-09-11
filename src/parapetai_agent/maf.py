@@ -254,6 +254,7 @@ from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.response_judge import JudgeConfig
 from parapetai_agent.scoped_data import (
     _CombinedIdentityContext,
+    effective_agent_identity_claims,
     effective_identity_claims,
     effective_identity_roles,
 )
@@ -510,6 +511,17 @@ def _identity_roles(kwargs: Mapping[str, Any] | None) -> list[str]:
     return effective_identity_roles(explicit if isinstance(explicit, (list, tuple)) else None)
 
 
+def _agent_identity_claims(kwargs: Mapping[str, Any] | None) -> dict[str, str]:
+    """Same shape as _identity_claims, for the AGENT/delegated-actor's own
+    claims -- see scoped_data.effective_agent_identity_claims(). An
+    explicit `agent_identity_claims` key in function_invocation_kwargs
+    wins (symmetric with identity_claims' own override), falling back to
+    whatever identity_from_bearer_token()/set_current_agent_identity() set
+    ambiently."""
+    explicit = kwargs.get("agent_identity_claims") if kwargs else None
+    return effective_agent_identity_claims(explicit if isinstance(explicit, dict) else None)
+
+
 def _parent_context_from_correlation(chat: _ChatCorrelation) -> OtelContext | None:
     """Reconstructs a usable parent Context from a completed span's
     SpanContext alone (the live Span object is long gone by the time
@@ -764,6 +776,7 @@ class ParapetChatMiddleware(ChatMiddleware):
             # test_maf.py, which is exactly why that test exists.
             identity_claims = _identity_claims(context.function_invocation_kwargs)
             identity_roles = _identity_roles(context.function_invocation_kwargs)
+            agent_identity_claims = _agent_identity_claims(context.function_invocation_kwargs)
             snapshot = Snapshot(
                 provider=correlation.provider,
                 endpoint="in-process:maf:model_call",
@@ -774,6 +787,7 @@ class ParapetChatMiddleware(ChatMiddleware):
                 stream=correlation.stream,
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                agent_identity_claims=agent_identity_claims,
             )
             principal = _effective_principal(self.caller)
             # Tier-2 scanners run BEFORE the Cedar decision, never after --
@@ -822,6 +836,7 @@ class ParapetChatMiddleware(ChatMiddleware):
                     correlation,
                     identity_claims,
                     identity_roles,
+                    agent_identity_claims,
                     trace_id,
                     scope_id,
                 )
@@ -866,6 +881,7 @@ class ParapetChatMiddleware(ChatMiddleware):
                 response_preview=chat_response.text[:_PREVIEW_CHARS],
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                agent_identity_claims=agent_identity_claims,
             )
             # QUAL-1: score the model's own response against the source it was
             # given (the prompt), in-process. Mirrors the PRE-call tier-2 path:
@@ -939,6 +955,7 @@ class ParapetChatMiddleware(ChatMiddleware):
         correlation: _ChatCorrelation,
         identity_claims: dict[str, str],
         identity_roles: list[str],
+        agent_identity_claims: dict[str, str],
         trace_id: str | None,
         scope_id: str | None,
     ) -> None:
@@ -1002,6 +1019,7 @@ class ParapetChatMiddleware(ChatMiddleware):
                 response_preview=finalized.text[:_PREVIEW_CHARS],
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                agent_identity_claims=agent_identity_claims,
             )
             result = self.hook.evaluate(
                 snapshot=response_snapshot, stage="post", principal=principal
@@ -1068,6 +1086,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
         ):
             identity_claims = _identity_claims(context.kwargs)
             identity_roles = _identity_roles(context.kwargs)
+            agent_identity_claims = _agent_identity_claims(context.kwargs)
             tool_args = _model_to_dict(context.arguments)
             vendor = _resolve_vendor_call(getattr(context.function, "func", None), tool_args)
             snapshot = Snapshot(
@@ -1079,6 +1098,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 tool_args=tool_args,
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                agent_identity_claims=agent_identity_claims,
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,
@@ -1130,6 +1150,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 tool_result_preview=str(context.result)[:_PREVIEW_CHARS],
                 identity_claims=identity_claims,
                 identity_roles=identity_roles,
+                agent_identity_claims=agent_identity_claims,
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,

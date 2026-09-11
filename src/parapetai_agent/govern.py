@@ -516,14 +516,22 @@ class Governor:
         *,
         roles: Sequence[str] | None = None,
         claims: Mapping[str, Any] | None = None,
+        agent_claims: Mapping[str, Any] | None = None,
         model: str | None = None,
         tools: Sequence[str] | None = None,
         raise_on_deny: bool = True,
     ) -> Decision:
         """Pre-model guardrail: run any configured input scanners (PII, secrets,
         injection) and a Cedar `model_call` decision before the model sees the
-        prompt."""
-        claims_d, roles_l = self._identity(claims, roles)
+        prompt.
+
+        `agent_claims` -- the calling AGENT's own claims (typically an RFC
+        8693 `act` claim, or azp/appid, resolved via
+        token_identity.agent_identity_from_claims()) -- is distinct from
+        `claims` (the END USER's). Both reach the audit record separately
+        (Snapshot.identity_claims vs. agent_identity_claims); neither is
+        inferred from the other."""
+        claims_d, roles_l, agent_claims_d = self._identity(claims, roles, agent_claims)
         snap = Snapshot(
             provider=_PROVIDER,
             endpoint="in-process:govern:model_call",
@@ -533,6 +541,7 @@ class Governor:
             declared_tools=list(tools or []),
             identity_claims=claims_d,
             identity_roles=roles_l,
+            agent_identity_claims=agent_claims_d,
         )
         extra: dict[str, Any] = {}
         if self._content_checks is not None:
@@ -582,6 +591,7 @@ class Governor:
         *,
         roles: Sequence[str] | None = None,
         claims: Mapping[str, Any] | None = None,
+        agent_claims: Mapping[str, Any] | None = None,
         func: Callable[..., Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
         raise_on_deny: bool = True,
@@ -612,7 +622,7 @@ class Governor:
         match (or a hand-written Cedar policy) that reads those fields
         needs no special case for "this call came through Governor."
         """
-        claims_d, roles_l = self._identity(claims, roles)
+        claims_d, roles_l, agent_claims_d = self._identity(claims, roles, agent_claims)
         args = dict(arguments or {})
         vendor = _resolve_vendor_call_from_metadata(metadata) or _resolve_vendor_call(func, args)
         snap = Snapshot(
@@ -623,6 +633,7 @@ class Governor:
             tool_args=args,
             identity_claims=claims_d,
             identity_roles=roles_l,
+            agent_identity_claims=agent_claims_d,
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
@@ -681,6 +692,7 @@ class Governor:
         sources: Sequence[str] | None = None,
         roles: Sequence[str] | None = None,
         claims: Mapping[str, Any] | None = None,
+        agent_claims: Mapping[str, Any] | None = None,
         model: str | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
@@ -700,7 +712,7 @@ class Governor:
         `$/1M token` price table (`policy/pricing.py`,
         `PARAPETAI_MODEL_PRICING`) — the caller reports tokens, not
         dollars. See docs/reference/cost-tracking.md."""
-        claims_d, roles_l = self._identity(claims, roles)
+        claims_d, roles_l, agent_claims_d = self._identity(claims, roles, agent_claims)
         snap = Snapshot(
             provider=_PROVIDER,
             endpoint="in-process:govern:model_call",
@@ -709,6 +721,7 @@ class Governor:
             response_preview=str(response)[:_PREVIEW],
             identity_claims=claims_d,
             identity_roles=roles_l,
+            agent_identity_claims=agent_claims_d,
         )
         extra: dict[str, Any] = {}
         errors: list[str] = []
@@ -798,14 +811,29 @@ class Governor:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _identity(
-        claims: Mapping[str, Any] | None, roles: Sequence[str] | None
-    ) -> tuple[dict[str, str], list[str]]:
-        if claims is None and roles is None:
-            return {}, []  # unauthenticated: Cedar sees no identity_roles
-        return (
-            {str(k): str(v) for k, v in (claims or {}).items()},
-            [str(r) for r in (roles or [])],
+        claims: Mapping[str, Any] | None,
+        roles: Sequence[str] | None,
+        agent_claims: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, str], list[str], dict[str, str]]:
+        """Explicit-only, deliberately -- unlike MAF/ADK/LangGraph's own
+        _identity_claims()-style helpers, this never falls back to ambient
+        state (set_current_identity()/set_current_agent_identity()):
+        Governor's whole API contract is "the caller tells it who's
+        involved, per call" (see this class's own top-of-file example),
+        so None here means "no identity was asserted", not "check
+        somewhere else first". `agent_claims` -- the AGENT/delegated-
+        actor's own claims, distinct from `claims` (the end user's) --
+        follows the same explicit-only rule for the same reason."""
+        end_user = (
+            ({}, [])
+            if claims is None and roles is None
+            else (
+                {str(k): str(v) for k, v in (claims or {}).items()},
+                [str(r) for r in (roles or [])],
+            )
         )
+        agent = {str(k): str(v) for k, v in (agent_claims or {}).items()}
+        return (*end_user, agent)
 
     def _failure_decision(self, errors: tuple[str, ...]) -> Decision:
         try:

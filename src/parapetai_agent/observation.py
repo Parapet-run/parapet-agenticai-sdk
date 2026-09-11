@@ -59,6 +59,7 @@ import functools
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -540,6 +541,9 @@ _mcp_active_budget: CollectionBudget | None = None
 _mcp_original_call_tool: Any | None = None
 _mcp_original_initialize: Any | None = None
 _mcp_original_list_tools: Any | None = None
+# Transport-connector originals, keyed by (module_path, attr_name) -- see
+# _patch_transport_connectors()/_unpatch_transport_connectors() below.
+_mcp_original_transport_connectors: dict[tuple[str, str], Any] = {}
 
 
 def _host_from_url(url: str) -> str | None:
@@ -547,6 +551,122 @@ def _host_from_url(url: str) -> str | None:
         return urlparse(url).hostname
     except ValueError:
         return None
+
+
+# --------------------------------------------------------------------------
+# Real MCP server URL capture. _emit_mcp_initialize_span()'s own docstring
+# used to record why this was believed unreachable: `ClientSession` is
+# constructed from raw read/write streams (verified against the installed
+# `mcp` package's __init__ signature), not a URL -- only whatever built the
+# underlying transport ever holds that, and patching ClientSession itself
+# (the class-level patch above, chosen for its import-order independence)
+# structurally cannot see it.
+#
+# The fix: patch the TRANSPORT CONNECTORS themselves --
+# mcp.client.sse.sse_client, mcp.client.streamable_http.streamablehttp_client
+# (and the streamable_http_client alias some callers use), and
+# mcp.client.websocket.websocket_client -- confirmed directly against the
+# installed `mcp` package that all four are `@asynccontextmanager`-wrapped
+# async generator functions taking `url` as their first argument. Each
+# wrapped connector stashes that url in a ContextVar for the duration of the
+# `async with ...:` block; `_patched_initialize` below reads it while still
+# inside that same block (the whole `async with sse_client(url) as (r, w):
+# session = ClientSession(r, w); await session.initialize()` sequence runs
+# in one coroutine/task, and a ContextVar set earlier in that chain is still
+# visible later in it -- the same propagation set_current_framework() above
+# already relies on, not a new assumption).
+#
+# IMPORT-ORDER CAVEAT, stated plainly rather than left implicit: unlike the
+# ClientSession class-level patch (real inheritance, works regardless of
+# when it's applied relative to any session construction), a caller that
+# does `from mcp.client.sse import sse_client` at ITS OWN module top level
+# binds that name at THAT module's import time -- confirmed against
+# google.adk.tools.mcp_tool.mcp_session_manager, which does exactly this.
+# If that ADK module is already imported before enable_mcp_observation()
+# runs, ADK's own bound reference is the ORIGINAL, unpatched function, and
+# the URL is not captured for THAT session (silently -- initialize() still
+# emits its span, just without parapetai.mcp.server_url). In the normal
+# embedding order -- Bootstrap/GovernedRunner construction (which calls
+# enable_mcp_observation()) before the embedding app constructs its own MCP
+# tools -- this is a non-issue: confirmed live that a bare `import
+# google.adk` does NOT eagerly import mcp_session_manager, so the patch is
+# already in place by the time ADK's own lazy `from mcp.client.sse import
+# sse_client` runs and resolves to the (by-then-patched) module attribute.
+# agent_framework's own MCP tool implementation is unaffected either way --
+# confirmed it imports streamablehttp_client/websocket_client with a LOCAL
+# import inside the method that uses them, a fresh attribute lookup on
+# every call, so it is never sensitive to import order at all.
+_TRANSPORT_URL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "parapetai_agent_observation_current_transport_url", default=None
+)
+
+# (module dotted path, attribute name) for every transport connector known
+# to take `url` as its first argument -- confirmed against the installed
+# `mcp` package's own signatures, not assumed. `mcp.client.stdio.stdio_client`
+# is deliberately excluded: it takes a command/args, not a URL, so there is
+# no URL to capture for a locally-spawned server.
+_TRANSPORT_CONNECTOR_TARGETS: tuple[tuple[str, str], ...] = (
+    ("mcp.client.sse", "sse_client"),
+    ("mcp.client.streamable_http", "streamablehttp_client"),
+    ("mcp.client.streamable_http", "streamable_http_client"),
+    ("mcp.client.websocket", "websocket_client"),
+)
+
+
+def _wrap_transport_connector(original: Any) -> Any:
+    """Wraps one url-taking `@asynccontextmanager` transport connector so
+    entering it publishes `url` to `_TRANSPORT_URL` for the duration of the
+    `async with` block, then restores whatever was there before (never just
+    clearing to None -- a nested/second connection inside the same task,
+    however unusual, must not have its OWN url wiped by an outer one's
+    exit). Forwards args/kwargs and the yielded value completely opaquely
+    (whatever tuple arity the real connector yields -- 2 for sse_client/
+    websocket_client, 3 for streamablehttp_client -- passes through
+    unexamined), so this never needs updating if a future `mcp` release
+    changes what a connector yields."""
+
+    @functools.wraps(original)
+    @asynccontextmanager
+    async def _wrapped(url: str, *args: Any, **kwargs: Any) -> Any:
+        token = _TRANSPORT_URL.set(url)
+        try:
+            async with original(url, *args, **kwargs) as value:
+                yield value
+        finally:
+            _TRANSPORT_URL.reset(token)
+
+    return _wrapped
+
+
+def _patch_transport_connectors() -> None:
+    """Best-effort per target: some `mcp` package versions/installs may not
+    ship every one of these submodules (e.g. websocket support pulled via
+    an extra); a missing one must not prevent patching the others. Already-
+    patched targets (module attr is already one of our own `_wrapped`
+    closures, i.e. present in `_mcp_original_transport_connectors`) are
+    skipped -- same idempotent-re-enable posture as call_tool/initialize/
+    list_tools above."""
+    for module_path, attr_name in _TRANSPORT_CONNECTOR_TARGETS:
+        key = (module_path, attr_name)
+        if key in _mcp_original_transport_connectors:
+            continue
+        try:
+            module = __import__(module_path, fromlist=[attr_name])
+            original = getattr(module, attr_name)
+        except (ImportError, AttributeError):
+            continue
+        _mcp_original_transport_connectors[key] = original
+        setattr(module, attr_name, _wrap_transport_connector(original))
+
+
+def _unpatch_transport_connectors() -> None:
+    for (module_path, attr_name), original in _mcp_original_transport_connectors.items():
+        try:
+            module = __import__(module_path, fromlist=[attr_name])
+            setattr(module, attr_name, original)
+        except ImportError:
+            pass
+    _mcp_original_transport_connectors.clear()
 
 
 # --------------------------------------------------------------------------
@@ -622,14 +742,19 @@ def _emit_mcp_initialize_span(session: Any, result: Any) -> None:
     call sites wrap this the same "tagging must not break the real call"
     way emit_observed_span() already documents for itself.
 
-    Does NOT include the MCP server's URL: mcp.client.session.ClientSession
-    is constructed from raw read/write streams (verified directly against
-    the installed package's __init__ signature), not a URL -- only
-    whatever built the underlying transport (e.g. streamablehttp_client())
-    ever holds that, and this module patches ClientSession itself, not a
-    transport constructor. serverInfo.websiteUrl (already cached as
-    _parapetai_server_host for call_tool's own `destination` field) is the
-    only server-identifying URL-shaped field reachable from here."""
+    `parapetai.mcp.server_url` -- the REAL endpoint this session actually
+    connected to -- is read from `self._parapetai_server_url`, cached by
+    _patched_initialize() from `_TRANSPORT_URL` (see the transport-
+    connector patching block above): the one field genuinely NOT reachable
+    from `ClientSession` itself (constructed from raw read/write streams,
+    verified directly against the installed package's __init__ signature)
+    without that separate patch. `server_website_url` below is a DIFFERENT,
+    weaker signal -- the server's own self-declared serverInfo.websiteUrl
+    (a marketing page, not necessarily even the same host as the actual API
+    endpoint) -- kept alongside, not replaced by, the real URL: a control
+    plane consumer should prefer server_url when present and only fall back
+    to server_website_url (e.g. for a stdio-transport session, which has no
+    URL at all) when it isn't."""
     server_info = getattr(result, "serverInfo", None)
     client_info = getattr(session, "_client_info", None)
     attrs: dict[str, Any] = {
@@ -638,6 +763,9 @@ def _emit_mcp_initialize_span(session: Any, result: Any) -> None:
             _server_capabilities_dict(getattr(result, "capabilities", None))
         ),
     }
+    server_url = getattr(session, "_parapetai_server_url", None)
+    if server_url:
+        attrs["parapetai.mcp.server_url"] = server_url
     if server_info is not None:
         attrs["parapetai.mcp.server_name"] = getattr(server_info, "name", None) or ""
         attrs["parapetai.mcp.server_version"] = getattr(server_info, "version", None) or ""
@@ -759,13 +887,32 @@ def enable_mcp_observation(
 
     @functools.wraps(original_initialize)
     async def _patched_initialize(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # Read BEFORE awaiting the real initialize() -- still inside the
+        # same `async with sse_client(url)/streamablehttp_client(url):`
+        # block that set this, per the transport-connector patching block's
+        # own docstring on why that ordering is safe to rely on.
+        transport_url = _TRANSPORT_URL.get()
         result = await original_initialize(self, *args, **kwargs)
         try:
+            if transport_url:
+                self._parapetai_server_url = transport_url
             server_info = getattr(result, "serverInfo", None)
             if server_info is not None:
                 self._parapetai_server_name = getattr(server_info, "name", None)
                 website = getattr(server_info, "websiteUrl", None)
-                self._parapetai_server_host = _host_from_url(website) if website else None
+                # The REAL connection host (from the transport url, when we
+                # have one) is ground truth -- confirmed always accurate,
+                # since it's literally what this session dialed. Only fall
+                # back to the server's self-declared websiteUrl (a
+                # marketing page, not guaranteed to share a host with the
+                # actual API endpoint) when there's no transport url at all
+                # (a stdio-transport session, or ADK's own import-order
+                # caveat above).
+                self._parapetai_server_host = (
+                    _host_from_url(transport_url)
+                    if transport_url
+                    else (_host_from_url(website) if website else None)
+                )
             if _mcp_active_agent_id is not None:
                 _emit_mcp_initialize_span(self, result)
         except Exception:  # noqa: BLE001 -- never let tagging break a real initialize() call.
@@ -808,6 +955,9 @@ def enable_mcp_observation(
     ClientSession.initialize = _patched_initialize  # type: ignore[method-assign]
     ClientSession.call_tool = _patched_call_tool  # type: ignore[method-assign]
     ClientSession.list_tools = _patched_list_tools  # type: ignore[method-assign]
+    # See the transport-connector patching block's own docstring for what
+    # this adds (the real server URL) and its import-order caveat.
+    _patch_transport_connectors()
     log.info("mcp_observation_enabled", agent_id=agent_id)
     return resolved_budget
 
@@ -835,6 +985,7 @@ def disable_mcp_observation() -> None:
             ClientSession.list_tools = _mcp_original_list_tools  # type: ignore[method-assign,assignment]
         except ImportError:
             pass
+    _unpatch_transport_connectors()
     _mcp_active_agent_id = None
     _mcp_active_budget = None
     _mcp_original_call_tool = None

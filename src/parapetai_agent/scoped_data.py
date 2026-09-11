@@ -334,6 +334,29 @@ def effective_identity_roles(explicit: Sequence[Any] | None) -> list[str]:
     return list(ambient.roles) if ambient else []
 
 
+def effective_agent_identity_claims(explicit: Mapping[str, Any] | None) -> dict[str, str]:
+    """The AGENT/delegated-actor's own claims, distinct from
+    effective_identity_claims() (the END USER's claims) above -- same
+    explicit-wins-ambient-fallback precedence, source is
+    _current_agent_identity (set by set_current_agent_identity()/
+    identity_from_bearer_token()'s agent half) rather than
+    _current_identity.
+
+    Before this existed, an agent's own token claims (typically an RFC
+    8693 `act` claim, or azp/appid) were used ONLY to compute
+    effective_principal()'s resolved string -- the fuller claims dict
+    (e.g. `act.iss`, when present) was discarded once that string was
+    built. Snapshot.agent_identity_claims (providers/parsers.py) is what
+    actually reaches a decision's audit record with this; this function is
+    how a framework adapter (maf.py/adk.py/langgraph.py) reads the value to
+    put there, the same way _identity_claims()-style helpers already read
+    effective_identity_claims() for the end-user half."""
+    if explicit is not None:
+        return {str(k): str(v) for k, v in explicit.items()}
+    ambient = _current_agent_identity.get()
+    return dict(ambient.claims) if ambient else {}
+
+
 def current_scoped_data() -> ScopedData:
     """A read-only snapshot of whatever end-user/agent identity is
     currently ambient, for a framework adapter that wants ScopedData's

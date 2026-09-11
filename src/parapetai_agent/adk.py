@@ -191,7 +191,11 @@ from parapetai_agent.policy.pricing import estimate_cost_usd_micros
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.scoped_data import agent_identity as agent_identity
 from parapetai_agent.scoped_data import current_identity as current_identity
-from parapetai_agent.scoped_data import effective_identity_claims, effective_identity_roles
+from parapetai_agent.scoped_data import (
+    effective_agent_identity_claims,
+    effective_identity_claims,
+    effective_identity_roles,
+)
 from parapetai_agent.scoped_data import effective_principal as _effective_principal
 from parapetai_agent.scoped_data import governed_identity as governed_identity
 from parapetai_agent.scoped_data import identity_from_bearer_token as identity_from_bearer_token
@@ -451,6 +455,7 @@ class _ModelCorrelation:
     principal: str = ""
     identity_claims: dict[str, str] = field(default_factory=dict)
     identity_roles: list[str] = field(default_factory=list)
+    agent_identity_claims: dict[str, str] = field(default_factory=dict)
     stream: bool = False
     partial_text: list[str] = field(default_factory=list)
 
@@ -531,6 +536,7 @@ class ParapetPlugin(BasePlugin):
             callback_context.user_id, trust_session_user_id=self._trust_session_user_id
         )
         identity_roles = _resolved_identity_roles()
+        agent_identity_claims = effective_agent_identity_claims(None)
         principal = _effective_principal(self.caller)
 
         span = _tracer.start_span("parapetai.model_call")
@@ -541,6 +547,7 @@ class ParapetPlugin(BasePlugin):
             principal=principal,
             identity_claims=identity_claims,
             identity_roles=identity_roles,
+            agent_identity_claims=agent_identity_claims,
             stream=stream,
         )
         correlation.provider = provider_for_request(llm_request)
@@ -562,6 +569,7 @@ class ParapetPlugin(BasePlugin):
             stream=stream,
             identity_claims=identity_claims,
             identity_roles=identity_roles,
+            agent_identity_claims=agent_identity_claims,
         )
         _set_oi_attributes(
             span,
@@ -676,6 +684,7 @@ class ParapetPlugin(BasePlugin):
                 response_preview=accumulated[:_PREVIEW_CHARS],
                 identity_claims=correlation.identity_claims,
                 identity_roles=correlation.identity_roles,
+                agent_identity_claims=correlation.agent_identity_claims,
             )
             # Seeded with the JUST-updated cumulative totals so a post-stage
             # policy (e.g. ALTER once a turn crosses a budget) sees this
@@ -717,6 +726,7 @@ class ParapetPlugin(BasePlugin):
                 tool_context.user_id, trust_session_user_id=self._trust_session_user_id
             ),
             identity_roles=_resolved_identity_roles(),
+            agent_identity_claims=effective_agent_identity_claims(None),
             provider=self._provider_by_invocation.get(invocation_id, "gemini"),
         )
 
@@ -754,6 +764,7 @@ class ParapetPlugin(BasePlugin):
             tool_args=dict(tool_args),
             identity_claims=correlation.identity_claims,
             identity_roles=correlation.identity_roles,
+            agent_identity_claims=correlation.agent_identity_claims,
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
@@ -798,6 +809,7 @@ class ParapetPlugin(BasePlugin):
                 tool_context.user_id, trust_session_user_id=self._trust_session_user_id
             ),
             identity_roles=_resolved_identity_roles(),
+            agent_identity_claims=effective_agent_identity_claims(None),
             provider=self._provider_by_invocation.get(invocation_id, "gemini"),
         )
         try:
@@ -815,6 +827,7 @@ class ParapetPlugin(BasePlugin):
                 tool_result_preview=json.dumps(result, default=str)[:_PREVIEW_CHARS],
                 identity_claims=correlation.identity_claims,
                 identity_roles=correlation.identity_roles,
+                agent_identity_claims=correlation.agent_identity_claims,
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,

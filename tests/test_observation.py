@@ -670,3 +670,131 @@ async def test_disable_mcp_observation_restores_the_original_methods() -> None:
     disable_mcp_observation()
     assert mcp_observation_enabled() is False
     assert ClientSession.call_tool is _fake_call_tool  # restored, unwrapped
+
+
+async def test_transport_connector_patch_captures_real_server_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The real fix under test: `_emit_mcp_initialize_span`'s server_url
+    used to be unreachable entirely (see that function's own docstring
+    history) because `ClientSession` never sees the URL its transport
+    connected to. `enable_mcp_observation` now also wraps
+    `mcp.client.sse.sse_client` (patched here as a fake standing in for the
+    real one, same style `_FakeMcpSession` already uses for `ClientSession`
+    itself) to capture that URL via a ContextVar for the duration of the
+    `async with sse_client(url):` block -- this asserts it actually reaches
+    the emitted handshake span, AND that it wins over a DIFFERENT-host
+    serverInfo.websiteUrl for the cached destination host `call_tool`'s own
+    span later reads (the real transport host is ground truth; the
+    server's self-declared website is not necessarily even the same
+    host)."""
+    from contextlib import asynccontextmanager
+
+    import mcp.client.sse as sse_module
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    real_url = "https://mcp.example.com/sse"
+
+    @asynccontextmanager
+    async def _fake_sse_client(url, *a, **k):  # type: ignore[no-untyped-def]
+        assert url == real_url
+        yield ("read-stream", "write-stream")
+
+    monkeypatch.setattr(sse_module, "sse_client", _fake_sse_client)
+
+    class _ServerInfo:
+        name = "salesforce-mcp"
+        # Deliberately a DIFFERENT host from real_url -- proves the real
+        # transport url wins, not just that a url shows up at all.
+        websiteUrl = "https://vendor.example/about"
+
+    class _InitResult:
+        serverInfo = _ServerInfo()
+
+    async def _fake_initialize(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _InitResult()
+
+    async def _fake_call_tool(self, name, arguments=None, *a, **k):  # type: ignore[no-untyped-def]
+        return None
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    ClientSession.call_tool = _fake_call_tool  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-url-1")
+
+    # Re-fetch the same way a real caller does (ADK's own
+    # mcp_session_manager.py: `from mcp.client.sse import sse_client`) --
+    # confirms the patched module ATTRIBUTE is what a fresh import sees,
+    # not just a reference this test happened to hold onto already.
+    from mcp.client.sse import sse_client
+
+    session = _FakeMcpSession()
+    async with sse_client(real_url) as (read, write):
+        assert (read, write) == ("read-stream", "write-stream")
+        await ClientSession.initialize(session)
+
+    (span,) = _mcp_spans_named("parapetai.mcp_session_initialize")
+    attrs = dict(span.attributes or {})
+    assert attrs["parapetai.mcp.server_url"] == real_url
+    assert attrs["parapetai.mcp.server_website_url"] == "https://vendor.example/about"
+    assert session._parapetai_server_host == "mcp.example.com"
+
+    await ClientSession.call_tool(session, "create_salesforce_opportunity", {})
+    (call_span,) = _observed_mcp_spans()
+    assert dict(call_span.attributes or {})["parapetai.observed.destination"] == "mcp.example.com"
+
+
+async def test_transport_connector_patch_falls_back_to_website_url_host_without_a_session() -> (
+    None
+):
+    """No `async with sse_client(...):` at all in this test (e.g. a stdio-
+    transport session, which has no URL) -- `_TRANSPORT_URL` stays unset,
+    so this must fall back to the OLD behavior (serverInfo.websiteUrl's
+    host) exactly as before this feature existed, not silently lose the
+    destination host altogether."""
+    from mcp.client.session import ClientSession
+
+    from parapetai_agent.observation import enable_mcp_observation
+
+    class _ServerInfo:
+        name = "salesforce-mcp"
+        websiteUrl = "https://vendor.example/about"
+
+    class _InitResult:
+        serverInfo = _ServerInfo()
+
+    async def _fake_initialize(self, *a, **k):  # type: ignore[no-untyped-def]
+        return _InitResult()
+
+    async def _fake_call_tool(self, name, arguments=None, *a, **k):  # type: ignore[no-untyped-def]
+        return None
+
+    ClientSession.initialize = _fake_initialize  # type: ignore[method-assign]
+    ClientSession.call_tool = _fake_call_tool  # type: ignore[method-assign]
+    enable_mcp_observation("agent-mcp-url-2")
+
+    session = _FakeMcpSession()
+    await ClientSession.initialize(session)
+
+    (span,) = _mcp_spans_named("parapetai.mcp_session_initialize")
+    attrs = dict(span.attributes or {})
+    assert "parapetai.mcp.server_url" not in attrs
+    assert session._parapetai_server_host == "vendor.example"
+
+
+async def test_disable_mcp_observation_restores_transport_connectors(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from contextlib import asynccontextmanager
+
+    import mcp.client.sse as sse_module
+
+    from parapetai_agent.observation import disable_mcp_observation, enable_mcp_observation
+
+    @asynccontextmanager
+    async def _fake_sse_client(url, *a, **k):  # type: ignore[no-untyped-def]
+        yield ("r", "w")
+
+    monkeypatch.setattr(sse_module, "sse_client", _fake_sse_client)
+    enable_mcp_observation("agent-mcp-url-3")
+    assert sse_module.sse_client is not _fake_sse_client  # now wrapped
+
+    disable_mcp_observation()
+    assert sse_module.sse_client is _fake_sse_client  # restored, unwrapped

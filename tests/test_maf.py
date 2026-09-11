@@ -954,6 +954,40 @@ class TestIdentityClaims:
         assert seen_contexts[0].get("identity_claims") == {"oid": "user-42"}
         assert seen_contexts[0].get("identity_roles") == ["OrderViewer"]
 
+    async def test_agent_identity_claims_reach_the_decision_context(self) -> None:
+        """The AGENT/delegated-actor's own claims (distinct from the end
+        user's identity_claims above) must reach the audit record too --
+        previously only used to compute the resolved principal string
+        (scoped_data.effective_principal()), then discarded."""
+        monkeypatch_engine, caller = _engine_and_caller()
+        mw = ParapetChatMiddleware(monkeypatch_engine, caller)
+        seen_contexts: list[dict[str, object]] = []
+        real_evaluate = monkeypatch_engine.evaluate
+
+        def _spy_evaluate(**kwargs: object) -> object:
+            seen_contexts.append(dict(kwargs["context"]))  # type: ignore[arg-type]
+            return real_evaluate(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch_engine.evaluate = _spy_evaluate  # type: ignore[method-assign]
+
+        ctx = ChatContext(
+            client=OpenAIChatCompletionClient(),
+            messages=[Message("user", ["hello"])],
+            options={"model": "gpt-4o-mini", "tools": []},
+            function_invocation_kwargs={
+                "identity_claims": {"oid": "user-42"},
+                "agent_identity_claims": {"sub": "agent-sp-1", "iss": "https://agent-idp.example"},
+            },
+        )
+        await mw.process(ctx, _noop_call_next)
+
+        assert len(seen_contexts) == 1
+        assert seen_contexts[0].get("identity_claims") == {"oid": "user-42"}
+        assert seen_contexts[0].get("agent_identity_claims") == {
+            "sub": "agent-sp-1",
+            "iss": "https://agent-idp.example",
+        }
+
     async def test_live_role_gate_via_real_agent_run(self, fake_upstream: None) -> None:
         """The real path this backs: a caller does
         agent.run(..., function_invocation_kwargs={"identity_roles": [...]})

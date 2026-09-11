@@ -69,6 +69,18 @@ class Snapshot:
     # `roles` claim (e.g. Entra ID app roles) by whoever authenticated the
     # caller -- this dataclass does not validate a token itself.
     identity_roles: list[str] = field(default_factory=list)
+    # The AGENT/delegated-actor's own claims -- distinct from identity_claims
+    # above (the END USER's claims). Before this field existed, an agent's
+    # own token claims (typically an RFC 8693 `act` claim, or azp/appid --
+    # see token_identity.agent_identity_from_claims()) were used ONLY to
+    # compute the Cedar principal string (scoped_data.effective_principal()),
+    # then discarded -- an operator could see WHO the agent identity
+    # resolved to, never what else its own token asserted (e.g. `act.iss`,
+    # when a real RFC 8693 token-exchange chain carries one). Populated the
+    # same way identity_claims is -- scoped_data.effective_agent_identity_
+    # claims(), read by each framework adapter alongside its own
+    # effective_identity_claims() call.
+    agent_identity_claims: dict[str, str] = field(default_factory=dict)
     # Declared vendor/CRUD facts about a tool call (parapetai_agent.vendor_calls),
     # set only for a tool whose function was decorated with
     # @declare_vendor_call or whose framework-native metadata dict resolved
@@ -135,6 +147,8 @@ class Snapshot:
         # live concurrent-task test that caught exactly this.
         if self.identity_claims or self.identity_roles:
             ctx["identity_roles"] = self.identity_roles
+        if self.agent_identity_claims:
+            ctx["agent_identity_claims"] = self.agent_identity_claims
         return ctx
 
     @property

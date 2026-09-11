@@ -120,6 +120,9 @@ from parapetai_agent.policy.pricing import estimate_cost_usd_micros
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.scoped_data import agent_identity as agent_identity
 from parapetai_agent.scoped_data import current_identity as current_identity
+from parapetai_agent.scoped_data import (
+    effective_agent_identity_claims as _effective_agent_identity_claims,
+)
 from parapetai_agent.scoped_data import effective_identity_claims as _effective_identity_claims
 from parapetai_agent.scoped_data import effective_identity_roles as _effective_identity_roles
 from parapetai_agent.scoped_data import effective_principal as _effective_principal
@@ -332,13 +335,16 @@ class ParapetAgentMiddleware(AgentMiddleware):
 
     def _pre_model_snapshot(
         self, request: ModelRequest
-    ) -> tuple[Snapshot, str, dict[str, str], list[str], _ModelCallScope, dict[str, int]]:
+    ) -> tuple[
+        Snapshot, str, dict[str, str], list[str], dict[str, str], _ModelCallScope, dict[str, int]
+    ]:
         texts = [_message_text(m) for m in request.messages]
         declared_tools = [
             getattr(t, "name", None) for t in request.tools if getattr(t, "name", None)
         ]
         identity_claims = _effective_identity_claims(None)
         identity_roles = _effective_identity_roles(None)
+        agent_identity_claims = _effective_agent_identity_claims(None)
         model_name = getattr(request.model, "model_name", None) or getattr(
             request.model, "model", None
         )
@@ -351,6 +357,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
             declared_tools=[str(t) for t in declared_tools],
             identity_claims=identity_claims,
             identity_roles=identity_roles,
+            agent_identity_claims=agent_identity_claims,
         )
         # COST-TRACK: trace_id is whatever before_agent set for this run (a
         # fresh one-off if it never fired -- e.g. an older langchain
@@ -365,10 +372,22 @@ class ParapetAgentMiddleware(AgentMiddleware):
         scope = _ModelCallScope(trace_id=trace_id, span_id=span_id, model=model_name)
         cost_context = _cost_tracker.context_for(trace_id=trace_id, scope_id=span_id)
         principal = _effective_principal(self.caller)
-        return snapshot, principal, identity_claims, identity_roles, scope, cost_context
+        return (
+            snapshot,
+            principal,
+            identity_claims,
+            identity_roles,
+            agent_identity_claims,
+            scope,
+            cost_context,
+        )
 
     def _post_model_snapshot(
-        self, response: ModelResponse, identity_claims: dict[str, str], identity_roles: list[str]
+        self,
+        response: ModelResponse,
+        identity_claims: dict[str, str],
+        identity_roles: list[str],
+        agent_identity_claims: dict[str, str],
     ) -> Snapshot:
         response_text = " ".join(_message_text(m) for m in response.result if _message_text(m))
         return Snapshot(
@@ -378,6 +397,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
             response_preview=response_text[:_PREVIEW_CHARS],
             identity_claims=identity_claims,
             identity_roles=identity_roles,
+            agent_identity_claims=agent_identity_claims,
         )
 
     def _record_usage(self, scope: _ModelCallScope, response: ModelResponse) -> dict[str, int]:
@@ -407,9 +427,15 @@ class ParapetAgentMiddleware(AgentMiddleware):
             _tracer.start_as_current_span("parapetai.model_call") as span,
         ):
             _current_model_span_context.set(span.get_span_context())
-            pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
-                self._pre_model_snapshot(request)
-            )
+            (
+                pre_snapshot,
+                principal,
+                identity_claims,
+                identity_roles,
+                agent_identity_claims,
+                scope,
+                cost_context,
+            ) = self._pre_model_snapshot(request)
             pre = self.hook.evaluate(
                 snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
             )
@@ -420,7 +446,9 @@ class ParapetAgentMiddleware(AgentMiddleware):
             response = handler(request)
 
             post_context = self._record_usage(scope, response)
-            post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
+            post_snapshot = self._post_model_snapshot(
+                response, identity_claims, identity_roles, agent_identity_claims
+            )
             post = self.hook.evaluate(
                 snapshot=post_snapshot,
                 stage="post",
@@ -447,9 +475,15 @@ class ParapetAgentMiddleware(AgentMiddleware):
             _tracer.start_as_current_span("parapetai.model_call") as span,
         ):
             _current_model_span_context.set(span.get_span_context())
-            pre_snapshot, principal, identity_claims, identity_roles, scope, cost_context = (
-                self._pre_model_snapshot(request)
-            )
+            (
+                pre_snapshot,
+                principal,
+                identity_claims,
+                identity_roles,
+                agent_identity_claims,
+                scope,
+                cost_context,
+            ) = self._pre_model_snapshot(request)
             pre = self.hook.evaluate(
                 snapshot=pre_snapshot, stage="pre", principal=principal, extra_context=cost_context
             )
@@ -460,7 +494,9 @@ class ParapetAgentMiddleware(AgentMiddleware):
             response = await handler(request)
 
             post_context = self._record_usage(scope, response)
-            post_snapshot = self._post_model_snapshot(response, identity_claims, identity_roles)
+            post_snapshot = self._post_model_snapshot(
+                response, identity_claims, identity_roles, agent_identity_claims
+            )
             post = self.hook.evaluate(
                 snapshot=post_snapshot,
                 stage="post",
@@ -498,6 +534,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
             tool_args=tool_args,
             identity_claims=_effective_identity_claims(None),
             identity_roles=_effective_identity_roles(None),
+            agent_identity_claims=_effective_agent_identity_claims(None),
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
