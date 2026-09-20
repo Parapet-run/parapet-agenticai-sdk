@@ -1,9 +1,11 @@
 // Role-gated tool access, backed by real IdP/OIDC/JWT role claims
 // (context.identity_roles, a Cedar Set<String> -- see
 // parapetai-agent/src/parapetai_agent/providers/parsers.py's Snapshot.identity_roles
-// and parapetai-agent/src/parapetai_agent/maf.py's _identity_roles()). Currently only
-// the MAF in-process path populates this; the HTTP path has no equivalent
-// identity source yet.
+// and parapetai-agent/src/parapetai_agent/maf.py's _identity_roles()). The in-process
+// adapters populate this from governed_identity(); the gateway populates it from a
+// verified IdP token when PARAPETAI_IDP_* is configured
+// (docs/reference/gateway-identity.md). An unverified HTTP-path request has no
+// identity source, so it asserts none.
 //
 // Scoped to `context has identity_roles` so this never changes behaviour
 // for a caller that doesn't assert identity at all (the HTTP path, or an

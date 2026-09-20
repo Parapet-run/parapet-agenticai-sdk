@@ -69,6 +69,17 @@ in [`gateway/README.md`](https://github.com/Parapet-run/parapet-agenticai-sdk/tr
 | `PARAPETAI_LOG_PROMPTS` | `"false"` | Whether to log prompt content as a separate, explicit `prompt_content` audit event. Opt-in only. |
 | `PARAPETAI_OBSERVATION_CAPTURE` | `"true"` | Opt-out for automatically observing every proxied `tools/call` for [vendor/resource/permission detection](vendor-scope-permission.md) — on by default whenever `PARAPETAI_AGENT_ID` is set. Same variable name the in-process SDK also reads. |
 | `PARAPETAI_VENDOR_SCOPED_RESOURCES` | `"false"` | Opt-in [vendor-scoped Cedar resources](vendor-calls.md), the gateway's counterpart of the `vendor_scoped_resources` flag on every in-process surface. When `true`, a `tools/call` evaluates against `Resource::"<vendor_system>/<vendor_operation>"`, or the fail-closed `Resource::"undeclared"` when no vendor is declared (the gateway has no tool→vendor mapping yet, so every tool call lands there). Leave `false` unless your policies already target that resource shape: existing `resource == Resource::"mcp"` rules stop matching once it is on. |
+| `PARAPETAI_REQUIRE_VERIFIED_IDENTITY` | `"false"` | When `true`, a request with no verified identity is refused (401) instead of falling back to the `/a/{agent_id}` path claim. Startup fails if no identity method is configured. See [verified identity](gateway-identity.md). |
+| `PARAPETAI_IDENTITY_HEADER` | `"x-parapetai-identity"` | Header carrying the caller's IdP-issued JWT. Not `Authorization` by default (that carries the caller's upstream credential under passthrough). Always stripped before forwarding. `authorization` conflicts with `PARAPETAI_MCP_AUTH_MODE=oauth2`. |
+| `PARAPETAI_IDP_ISSUER` | none | Expected `iss` of an accepted JWT, e.g. `https://login.microsoftonline.com/<tenant>/v2.0`. Setting any `PARAPETAI_IDP_*` requires issuer, JWKS URL and audience. |
+| `PARAPETAI_IDP_JWKS_URL` | none | The IdP's key-set URL. Must be `https://`. |
+| `PARAPETAI_IDP_AUDIENCE` | none | Comma-separated accepted `aud` values. |
+| `PARAPETAI_IDP_ALGORITHMS` | `"RS256"` | Accepted signing algorithms. `none` and `HS*` are refused at startup. |
+| `PARAPETAI_IDP_AGENT_CLAIMS` | `"azp,appid,client_id"` | Ordered claims; the first present one is the caller's agent identity. |
+| `PARAPETAI_IDENTITY_BINDINGS` | none | JSON file mapping a verified identity (JWT issuer+subject, or mTLS CN) to an `agent_id`. Required once any identity method is configured; a verified identity with no binding is refused. |
+| `PARAPETAI_TLS_CERT` / `PARAPETAI_TLS_KEY` | none | The gateway's own server certificate and key. Required when `PARAPETAI_TLS_CLIENT_CA` is set. |
+| `PARAPETAI_TLS_CLIENT_CA` | none | CA that signs client certificates. Setting it turns on mTLS, terminated in the gateway. |
+| `PARAPETAI_TLS_CLIENT_AUTH` | `"required"` | `required` refuses a handshake with no client certificate; `optional` lets JWT-only callers share the port. |
 | `PARAPETAI_MCP_AUTH_MODE` | `"none"` | `none` vs. `oauth2` for the `/mcp` path. |
 | `PARAPETAI_MCP_OAUTH_SHARED_SECRET` | none | OAuth2 shared secret, gates `/authorize`. **Required** when `PARAPETAI_MCP_AUTH_MODE=oauth2` — the gateway fails closed at startup if it's missing. |
 | `PARAPETAI_MCP_OAUTH_CODE_TTL_S` | `"300"` | OAuth2 authorization code TTL, seconds. |

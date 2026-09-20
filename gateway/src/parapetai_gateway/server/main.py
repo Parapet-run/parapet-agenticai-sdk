@@ -23,6 +23,7 @@ from parapetai_agent.control_plane import (
 from parapetai_agent.governance_runtime import configure_otel
 from parapetai_agent.policy.engine import PolicyEngine
 from parapetai_gateway.config import settings
+from parapetai_gateway.identity.mtls import uvicorn_tls_kwargs
 from parapetai_gateway.server.app import create_app
 
 log = structlog.get_logger(__name__)
@@ -180,9 +181,30 @@ def main() -> None:
             interval_s=settings.bundle_poll_interval_s,
         )
 
-    log.info("gateway_starting", mode=settings.mode, port=settings.port, **engine.status)
+    # mTLS is terminated here, in uvicorn. Built BEFORE serving so a
+    # half-configured listener raises now instead of running without client
+    # verification.
+    tls_kwargs = (
+        uvicorn_tls_kwargs(
+            cert=settings.tls_cert,
+            key=settings.tls_key,
+            client_ca=settings.tls_client_ca,
+            client_auth=settings.tls_client_auth,
+        )
+        if settings.tls_client_ca
+        else {}
+    )
+    log.info(
+        "gateway_starting",
+        mode=settings.mode,
+        port=settings.port,
+        mtls=bool(tls_kwargs),
+        identity_required=settings.require_verified_identity,
+        **engine.status,
+    )
     uvicorn.run(
         app,
+        **tls_kwargs,
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level,

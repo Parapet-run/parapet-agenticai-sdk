@@ -262,7 +262,10 @@ are what keep an outage from changing a decision:
 
 With no control plane, the identity provider comes from
 `PARAPETAI_IDP_ISSUER`, `PARAPETAI_IDP_JWKS_URL` and `PARAPETAI_IDP_AUDIENCE`,
-and bindings from a local file. Local mode is single-tenant by construction.
+and bindings from the JSON file named by `PARAPETAI_IDENTITY_BINDINGS` (the same record
+shape as `bindings` above). This standalone mode is implemented today; see
+[Gateway verified identity](reference/gateway-identity.md). Local mode is
+single-tenant by construction.
 
 ## Running without a control plane
 

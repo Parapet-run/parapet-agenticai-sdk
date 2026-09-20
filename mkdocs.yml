@@ -102,6 +102,7 @@ nav:
       - GovernedRunner: reference/governed-runner.md
       - ParapetAgentMiddleware: reference/langgraph.md
       - governed_identity: reference/governed-identity.md
+      - Gateway verified identity: reference/gateway-identity.md
       - Vendor/CRUD metadata: reference/vendor-calls.md
       - Corroboration: reference/corroboration.md
       - Automatic vendor/resource/permission detection: reference/vendor-scope-permission.md

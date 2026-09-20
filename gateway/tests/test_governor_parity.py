@@ -59,29 +59,6 @@ def _clear_spans() -> None:
     SPAN_EXPORTER.clear()
 
 
-@pytest.fixture
-def audited(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Records what _audit hands governance_runtime.audit, plus whether a span
-    was active at that moment -- the condition for the audit LogRecord to
-    carry a trace id."""
-    seen: list[dict[str, Any]] = []
-    real = app_module.governance_runtime.audit
-
-    def recorder(decision: Any, *, principal: str, snapshot: Any, resource: str, context: Any):
-        seen.append(
-            {
-                "principal": principal,
-                "resource": resource,
-                "context": dict(context),
-                "span_active": otel_trace.get_current_span().get_span_context().is_valid,
-            }
-        )
-        real(decision, principal=principal, snapshot=snapshot, resource=resource, context=context)
-
-    monkeypatch.setattr(app_module.governance_runtime, "audit", recorder)
-    return seen
-
-
 def test_decision_span_carries_the_same_attributes_as_an_in_process_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -146,6 +146,76 @@ class Settings:
             os.getenv("PARAPETAI_VENDOR_SCOPED_RESOURCES", "false").lower() == "true"
         )
     )
+    # ── verified caller identity (parapetai_gateway.identity) ────────────
+    # Off unless something below is configured: with none of it set the
+    # gateway behaves exactly as before, trusting the /a/{agent_id} path
+    # claim. See docs/reference/gateway-identity.md.
+    #
+    # When true, a request with NO verified identity is refused (401)
+    # instead of falling back to the path claim.
+    require_verified_identity: bool = field(
+        default_factory=lambda: (
+            os.getenv("PARAPETAI_REQUIRE_VERIFIED_IDENTITY", "false").lower() == "true"
+        )
+    )
+    # Header carrying the caller's IdP-issued JWT ("Bearer <jwt>" or the bare
+    # token). NOT `authorization` by default: under passthrough credential
+    # mode that header carries the caller's own UPSTREAM credential (an OpenAI
+    # key, a downstream MCP token), which is not an identity token and would
+    # be rejected as one. Always stripped before forwarding upstream.
+    identity_header: str = field(
+        default_factory=lambda: (
+            os.getenv("PARAPETAI_IDENTITY_HEADER", "x-parapetai-identity").strip().lower()
+        )
+    )
+    idp_issuer: str | None = field(
+        default_factory=lambda: os.getenv("PARAPETAI_IDP_ISSUER") or None
+    )
+    idp_jwks_url: str | None = field(
+        default_factory=lambda: os.getenv("PARAPETAI_IDP_JWKS_URL") or None
+    )
+    idp_audiences: tuple[str, ...] = field(
+        default_factory=lambda: tuple(_split(os.getenv("PARAPETAI_IDP_AUDIENCE", "")))
+    )
+    idp_algorithms: tuple[str, ...] = field(
+        default_factory=lambda: tuple(_split(os.getenv("PARAPETAI_IDP_ALGORITHMS", "RS256")))
+    )
+    # Ordered: the first claim present is the caller's agent identity. The
+    # default suits Entra (azp on v2 tokens, appid on v1) and RFC 9068
+    # (client_id).
+    idp_agent_claims: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            _split(os.getenv("PARAPETAI_IDP_AGENT_CLAIMS", "azp,appid,client_id"))
+        )
+    )
+    # JSON file mapping a verified identity to a Parapet agent_id. A valid
+    # token or certificate proves who the IdP/CA says the caller is; only a
+    # binding says which agent that is. No binding means deny.
+    identity_bindings_path: str | None = field(
+        default_factory=lambda: os.getenv("PARAPETAI_IDENTITY_BINDINGS") or None
+    )
+    # mTLS is terminated in the gateway itself (uvicorn), so it needs the
+    # server cert/key AND the CA that signs client certs. Setting the client
+    # CA is what turns it on. "required" refuses a handshake with no client
+    # certificate (which also refuses health probes that carry none);
+    # "optional" lets JWT-only callers share the port.
+    tls_cert: str | None = field(default_factory=lambda: os.getenv("PARAPETAI_TLS_CERT") or None)
+    tls_key: str | None = field(default_factory=lambda: os.getenv("PARAPETAI_TLS_KEY") or None)
+    tls_client_ca: str | None = field(
+        default_factory=lambda: os.getenv("PARAPETAI_TLS_CLIENT_CA") or None
+    )
+    tls_client_auth: str = field(
+        default_factory=lambda: os.getenv("PARAPETAI_TLS_CLIENT_AUTH", "required").lower()
+    )
+
+    @property
+    def jwt_identity_enabled(self) -> bool:
+        return bool(self.idp_issuer or self.idp_jwks_url or self.idp_audiences)
+
+    @property
+    def mtls_enabled(self) -> bool:
+        return self.tls_client_ca is not None
+
     # "none" (default): the /mcp path is reachable with no bearer credential at
     # all -- today's behaviour, unchanged. Cedar is still the real gate either
     # way (agent_id is an unverified path claim regardless of this setting,

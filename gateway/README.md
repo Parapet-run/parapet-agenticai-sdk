@@ -42,6 +42,14 @@ the wrong content-type is refused with HTTP 400 / JSON-RPC `-32600` — it canno
 be parsed into a `tools/call`, so it could not be checked against tool policy.
 (`PARAPETAI_MODE=monitor` logs it and lets it through, like every other block.)
 
+## Verified identity
+
+By default the caller's identity is the `/a/{agent_id}` URL claim, which nothing
+verifies. Configure an IdP (Entra, Okta, …) and/or mTLS and the gateway checks a
+real credential instead, then maps it to an agent through explicit bindings. A
+bad credential is refused and never falls back to the URL claim. Off unless
+configured; see [`docs/reference/gateway-identity.md`](../docs/reference/gateway-identity.md).
+
 ## Credentials
 
 `PARAPETAI_CREDENTIAL_MODE` defaults to `passthrough`: the caller's own

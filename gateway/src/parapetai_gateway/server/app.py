@@ -16,6 +16,7 @@ buffering an SSE response breaks them. We relay chunks as they arrive.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import json
 import secrets
@@ -34,7 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 from parapetai_agent import governance_runtime, observation
 from parapetai_agent.control_plane import ReviewClient, review_fingerprint
-from parapetai_agent.identity import Caller, resolve_from_path
+from parapetai_agent.identity import ANONYMOUS, Caller, resolve_from_path
 from parapetai_agent.otel import openinference as oi
 from parapetai_agent.policy.engine import Decision, PolicyEngine
 from parapetai_agent.policy.hooks import GovernanceHook
@@ -42,6 +43,14 @@ from parapetai_agent.providers.parsers import Snapshot, parse_request
 from parapetai_gateway import mcp_oauth
 from parapetai_gateway.config import Upstream, settings
 from parapetai_gateway.fingerprint import fingerprint
+from parapetai_gateway.identity.mtls import PEER_CERT_SCOPE_KEY
+from parapetai_gateway.identity.resolver import (
+    IdentityError,
+    IdentityResolver,
+    VerifiedIdentity,
+    build_resolver,
+    token_from_header,
+)
 
 # auth-integrations.md §10.16 Phase B: one tracer for the whole module,
 # same per-instrumentation-scope convention every framework adapter in the
@@ -67,7 +76,12 @@ router = APIRouter()
 _OBSERVATIONS_CAP = 500
 
 
-def create_app(engine: PolicyEngine, reviews: ReviewClient | None = None) -> FastAPI:
+def create_app(
+    engine: PolicyEngine,
+    reviews: ReviewClient | None = None,
+    *,
+    identity_resolver: IdentityResolver | None = None,
+) -> FastAPI:
     # Fail closed on a misconfigured oauth2 mode rather than silently running
     # an authorization server anyone can complete DCR + /authorize against
     # with no credential at all -- see mcp_oauth.py's module docstring.
@@ -76,8 +90,27 @@ def create_app(engine: PolicyEngine, reviews: ReviewClient | None = None) -> Fas
             "PARAPETAI_MCP_AUTH_MODE=oauth2 requires PARAPETAI_MCP_OAUTH_SHARED_SECRET to be set"
         )
 
+    # None unless an identity method is configured -- then the gateway trusts
+    # the /a/{agent_id} path claim exactly as it always did. A resolver built
+    # from half a config raises here, at startup (see build_resolver).
+    # Injectable so tests can supply a fixed key set instead of a live IdP.
+    resolver = identity_resolver or build_resolver(settings=settings)
+    if (
+        resolver is not None
+        and settings.oauth_enabled
+        and settings.identity_header == "authorization"
+    ):
+        # Both would claim the same header: the OAuth gate validates it as one
+        # of ITS opaque tokens, identity verification as an IdP JWT. Neither
+        # can be right about a header the other owns, so refuse to guess.
+        raise RuntimeError(
+            "PARAPETAI_IDENTITY_HEADER=authorization conflicts with PARAPETAI_MCP_AUTH_MODE="
+            "oauth2 (both read the Authorization header); use a different identity header"
+        )
+
     app = FastAPI(title="Parapet", docs_url="/__parapetai/docs", redoc_url=None)
     app.state.engine = engine
+    app.state.identity = resolver
     # None when no control plane is configured -- the gateway then behaves
     # exactly as it did before approvals existed: a review is refused and
     # never queued, because there is no queue and so nobody to ask.
@@ -375,6 +408,33 @@ async def proxy(full_path: str, request: Request) -> Response:
     # below, never a bypass.
     caller, path = resolve_from_path("/" + full_path)
 
+    # Verified identity, when configured, REPLACES the path claim: the agent
+    # the caller is comes from a binding on a credential the gateway checked,
+    # not from a URL segment the caller typed. A presented-but-invalid
+    # credential is refused here, before the body is read or Cedar runs --
+    # it must never fall back to the weaker path claim.
+    verified: VerifiedIdentity | None = None
+    resolver: IdentityResolver | None = request.app.state.identity
+    if resolver is not None:
+        try:
+            verified = await run_in_threadpool(
+                resolver.resolve,
+                peer_cert_der=request.scope.get(PEER_CERT_SCOPE_KEY),
+                identity_token=token_from_header(request.headers.get(settings.identity_header)),
+            )
+        except IdentityError as exc:
+            return _identity_refusal(exc.status, exc.code)
+        if verified is None and resolver.require_verified:
+            return _identity_refusal(401, "identity_required")
+        if verified is not None:
+            if caller.agent_id not in (ANONYMOUS, verified.agent_id):
+                # The URL names one agent, the credential proves another.
+                log.warning(
+                    "identity_path_mismatch", claimed=caller.agent_id, verified=verified.agent_id
+                )
+                return _identity_refusal(403, "identity_path_mismatch")
+            caller = dataclasses.replace(caller, agent_id=verified.agent_id)
+
     raw = await request.body()
     if len(raw) > settings.max_body_bytes:
         return _error(413, "body_too_large", "request exceeds PARAPETAI_MAX_BODY_BYTES")
@@ -453,10 +513,22 @@ async def proxy(full_path: str, request: Request) -> Response:
     # coverage matrix can tell a gateway-enforced call from "no framework
     # identity was sent".
     snapshot.framework = "gateway"
+    if verified is not None:
+        # The same three fields governed_identity()/identity_from_bearer_token()
+        # fill in-process, from the same claim mapping.
+        snapshot.identity_claims = verified.identity_claims
+        snapshot.identity_roles = verified.identity_roles
+        snapshot.agent_identity_claims = verified.agent_identity_claims
 
     # Gateway-only Cedar context, merged over Snapshot.to_context() +
     # tenant/trust_tier by GovernanceHook.
-    extra_context: dict[str, Any] = {"method": request.method, "path": path}
+    extra_context: dict[str, Any] = {
+        "method": request.method,
+        "path": path,
+        # How the caller was identified, so a policy can treat an unverified
+        # path claim differently from a verified identity.
+        "identity_method": verified.method if verified else "path",
+    }
     if mcp_target is not None:
         # Lets Cedar gate access per downstream server, not just per tool
         # name within one server -- e.g. "this agent may reach jira but not
@@ -492,6 +564,7 @@ async def proxy(full_path: str, request: Request) -> Response:
         agent_id=caller.agent_id,
         client_name=client_name,
         client_version=client_version,
+        identity_method=verified.method if verified else "path",
     )
 
     # Covers both "deny" and "review": Decision.allowed is False for each, and
@@ -594,6 +667,10 @@ async def _forward(
     # credential. broker (opt-in): strip it and inject PARAPETAI_<PROVIDER>_KEY
     # instead, as before. See docs/adr/0003.
     strip = _STRIPPED_HEADERS if settings.brokering_credentials else _CONNECTION_HEADERS
+    if request.app.state.identity is not None:
+        # The identity token is for the gateway, not the upstream: forwarding
+        # it would hand a downstream server a credential for this agent.
+        strip = strip | {settings.identity_header}
     headers = {k: v for k, v in request.headers.items() if k.lower() not in strip}
     if settings.brokering_credentials:
         credential = os.getenv(upstream.credential_env)
@@ -685,6 +762,18 @@ def _passthrough_headers(headers: httpx.Headers) -> dict[str, str]:
 
 
 # ── responses ────────────────────────────────────────────────────────
+
+
+def _identity_refusal(status: int, code: str) -> JSONResponse:
+    """401 (no/invalid credential) or 403 (valid but not permitted). `code` is
+    a stable, deliberately uninformative string -- the reason a credential
+    failed is logged, not returned, so a response cannot be used to probe."""
+    headers = {"www-authenticate": "Bearer"} if status == 401 else {}
+    return JSONResponse(
+        {"error": {"type": code, "message": "identity could not be verified"}},
+        status_code=status,
+        headers=headers,
+    )
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -886,6 +975,7 @@ def _record_observation(
     agent_id: str,
     client_name: str,
     client_version: str | None,
+    identity_method: str = "path",
 ) -> None:
     """Append to the observations ring buffer.
 
@@ -906,6 +996,7 @@ def _record_observation(
             "agent_id": agent_id,
             "client_name": client_name,
             "client_version": client_version,
+            "identity_method": identity_method,
         }
     )
 
