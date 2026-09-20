@@ -15,11 +15,12 @@ buffering an SSE response breaks them. We relay chunks as they arrive.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import secrets
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,12 +29,15 @@ import structlog
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace as _otel_trace
+from opentelemetry.trace import Span
 from starlette.concurrency import run_in_threadpool
 
 from parapetai_agent import governance_runtime, observation
 from parapetai_agent.control_plane import ReviewClient, review_fingerprint
 from parapetai_agent.identity import Caller, resolve_from_path
+from parapetai_agent.otel import openinference as oi
 from parapetai_agent.policy.engine import Decision, PolicyEngine
+from parapetai_agent.policy.hooks import GovernanceHook
 from parapetai_agent.providers.parsers import Snapshot, parse_request
 from parapetai_gateway import mcp_oauth
 from parapetai_gateway.config import Upstream, settings
@@ -412,28 +416,72 @@ async def proxy(full_path: str, request: Request) -> Response:
                 headers={"WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}"'},
             )
 
-    context = {
-        **snapshot.to_context(),
-        "method": request.method,
-        "path": path,
-        "tenant": caller.tenant,
-        "trust_tier": caller.trust_tier,
-    }
+    # An MCP POST whose body did not parse into a JSON-RPC 2.0 object -- a
+    # batch (a JSON array), malformed JSON, or JSON sent under the wrong
+    # content-type -- would otherwise fall through to the coarse
+    # `http_request` action below and never be checked as a `tool_call`,
+    # even when it carries one. Under a policy set that permits
+    # `http_request`, that made wrapping a `tools/call` in a batch a way
+    # around every tool policy. Cedar cannot judge what the parser could not
+    # read, so this is refused rather than guessed at (invariant 1: an
+    # unparsed payload denies). Bodyless requests are exempt: the GET that
+    # opens the server->client stream and the DELETE that ends a session
+    # carry none. Monitor mode keeps its contract -- log, never block.
+    if snapshot.provider == "mcp" and request.method == "POST" and raw and not snapshot.parsed:
+        if settings.enforcing:
+            log.warning("mcp_unparsed_body_rejected", agent=caller.agent_id, path=path)
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": _MCP_ERROR_INVALID_REQUEST,
+                        "message": (
+                            "Invalid Request: the gateway only accepts a single JSON-RPC 2.0 "
+                            "object (application/json). Batches and unparseable bodies are "
+                            "refused because they cannot be checked against tool policy."
+                        ),
+                    },
+                    "id": None,
+                },
+                status_code=400,
+                headers={"x-parapetai-decision": "deny"},
+            )
+        log.warning("monitor_would_block", agent=caller.agent_id, reason="mcp_unparsed_body")
+
+    # Same tag every in-process adapter sets on its own snapshots
+    # ("maf" | "adk" | "langgraph" | "governor"), so the control plane's
+    # coverage matrix can tell a gateway-enforced call from "no framework
+    # identity was sent".
+    snapshot.framework = "gateway"
+
+    # Gateway-only Cedar context, merged over Snapshot.to_context() +
+    # tenant/trust_tier by GovernanceHook.
+    extra_context: dict[str, Any] = {"method": request.method, "path": path}
     if mcp_target is not None:
         # Lets Cedar gate access per downstream server, not just per tool
         # name within one server -- e.g. "this agent may reach jira but not
         # servicenow" is otherwise inexpressible when both share one gateway.
-        context["mcp_target"] = mcp_target
+        extra_context["mcp_target"] = mcp_target
 
-    decision = engine.evaluate(
-        principal=caller.principal,
-        action=snapshot.action,
-        resource=f'Resource::"{snapshot.provider}"',
-        context=context,
+    # The SAME hook every in-process adapter drives, so context merge,
+    # resource construction, audit and span attributes cannot drift from
+    # Governor/GovernedAgent/GovernedRunner. stage="pre" matches what those
+    # adapters pass for a request-side decision: @stage("post") policies are
+    # excluded and unannotated ones still apply.
+    hook = GovernanceHook(
+        engine,
+        caller,
+        on_decision=_audit,
+        vendor_scoped_resources=settings.vendor_scoped_resources,
     )
+    with _decision_span(snapshot) as span:
+        decision = hook.evaluate(
+            snapshot=snapshot, stage="pre", extra_context=extra_context
+        ).decision
+        if not decision.allowed:
+            span.set_status(_otel_trace.Status(_otel_trace.StatusCode.ERROR, decision.reason))
 
     client_name, client_version = fingerprint(request.headers)
-    _audit(decision, caller, snapshot, context)
     if settings.log_prompts:
         _log_prompt_content(caller, snapshot, decision)
     _record_observation(
@@ -470,7 +518,9 @@ async def proxy(full_path: str, request: Request) -> Response:
 
     if not decision.allowed and not approved:
         if settings.enforcing:
-            return _provider_shaped_block(snapshot.provider, decision, review_id=review_id)
+            return _provider_shaped_block(
+                snapshot.provider, decision, review_id=review_id, rpc_id=_jsonrpc_id(body)
+            )
         log.warning(
             "monitor_would_block",
             agent=caller.agent_id,
@@ -647,6 +697,8 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
 # is being asked, worth retrying" -- a single code would collapse exactly the
 # distinction REVIEW exists to make.
 _MCP_ERROR_DENY = -32000
+# JSON-RPC's own reserved code for a request that is not a valid Request object.
+_MCP_ERROR_INVALID_REQUEST = -32600
 _MCP_ERROR_REVIEW = -32001
 
 
@@ -743,8 +795,27 @@ async def _resolve_review(
     return False, (str(review_id) if review_id else None)
 
 
+def _jsonrpc_id(body: Any) -> str | int | None:
+    """The request's own JSON-RPC `id`, so an MCP client can correlate a
+    block with the call it answers -- an error frame with `id: null` looks
+    like a protocol-level failure to a client that matches on id. Only a
+    string or integer is echoed (the two spec-legal id types; bool is an
+    int subclass but not a legal id); anything else, and a batch request,
+    stays null rather than reflecting arbitrary caller-supplied structure
+    back into a response."""
+    if not isinstance(body, dict):
+        return None
+    rpc_id = body.get("id")
+    if isinstance(rpc_id, bool) or not isinstance(rpc_id, (str, int)):
+        return None
+    return rpc_id
+
+
 def _provider_shaped_block(
-    provider: str, decision: Decision, review_id: str | None = None
+    provider: str,
+    decision: Decision,
+    review_id: str | None = None,
+    rpc_id: str | int | None = None,
 ) -> JSONResponse:
     """Return a non-allowed decision in the provider's own error shape.
 
@@ -793,7 +864,7 @@ def _provider_shaped_block(
             # JSON-RPC clients read the error object and never see headers, so
             # for MCP the ticket has to ride in `data` or it is unreachable.
             error["data"] = {"review_id": review_id, "retry_header": REVIEW_HEADER}
-        payload = {"jsonrpc": "2.0", "error": error, "id": None}
+        payload = {"jsonrpc": "2.0", "error": error, "id": rpc_id}
     else:
         payload = {
             "error": {
@@ -839,20 +910,49 @@ def _record_observation(
     )
 
 
-def _audit(decision: Decision, caller: Caller, snapshot: Any, context: dict[str, Any]) -> None:
-    # governance_runtime.audit() is the SAME "decision" event this function
-    # used to build by hand -- it strips content-bearing keys itself
-    # (content_free(), a strict superset of the messages_preview-only strip
-    # this used to do) and, when configure_otel() has run (server/main.py,
-    # only when a control plane is configured), ALSO ships it as a real OTel
-    # LogRecord to the control plane's /v1/logs -- a no-op otherwise, so this
-    # call is unconditionally safe with no control plane configured too.
+@contextlib.contextmanager
+def _decision_span(snapshot: Snapshot) -> Iterator[Span]:
+    """The span every in-process adapter opens around a decision
+    (`parapetai.tool_call` / `parapetai.model_call`), made ambient so that
+    (a) GovernanceHook stamps principal/action/resource/stage/decision on it,
+    and (b) _audit()'s OTel LogRecord picks up this trace/span id -- the log
+    emitter takes them from the active span, which is why an audit record
+    written outside one is uncorrelated. A request that parsed to neither
+    (`http_request`, the coarse fallback) gets its own name rather than
+    being mislabelled as one of the two."""
+    kind, attributes = _span_shape(snapshot)
+    with _tracer.start_as_current_span(f"parapetai.{snapshot.action}") as span:
+        governance_runtime.set_oi_attributes(span, {oi.SPAN_KIND_ATTR: kind, **attributes})
+        yield span
+
+
+def _span_shape(snapshot: Snapshot) -> tuple[str, dict[str, Any]]:
+    if snapshot.action == "tool_call":
+        return oi.SpanKind.TOOL, {oi.TOOL_NAME: snapshot.tool_name}
+    return oi.SpanKind.LLM, {oi.LLM_MODEL_NAME: snapshot.model, oi.LLM_PROVIDER: snapshot.provider}
+
+
+def _audit(
+    decision: Decision,
+    principal: str,
+    snapshot: Snapshot,
+    resource: str,
+    context: Mapping[str, Any],
+) -> None:
+    # GovernanceHook's `on_decision` callback. governance_runtime.audit() is
+    # the SAME "decision" event this function used to build by hand -- it
+    # strips content-bearing keys itself (content_free(), a strict superset
+    # of the messages_preview-only strip this used to do) and, when
+    # configure_otel() has run (server/main.py, only when a control plane is
+    # configured), ALSO ships it as a real OTel LogRecord to the control
+    # plane's /v1/logs -- a no-op otherwise, so this call is unconditionally
+    # safe with no control plane configured too.
+    #
+    # `principal`/`resource` arrive already resolved by the hook, so what is
+    # audited is exactly what Cedar evaluated -- including a vendor-scoped
+    # resource when that flag is on.
     governance_runtime.audit(
-        decision,
-        principal=caller.principal,
-        snapshot=snapshot,
-        resource=f'Resource::"{snapshot.provider}"',
-        context=context,
+        decision, principal=principal, snapshot=snapshot, resource=resource, context=context
     )
     if decision.evaluation_ms > settings.decision_budget_ms:
         log.warning(

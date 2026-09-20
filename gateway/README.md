@@ -36,6 +36,12 @@ provider's *own* error shape, so a client SDK surfaces a readable governance
 message instead of a deserialisation failure. Streaming relays faithfully —
 SSE chunks are never buffered or reordered.
 
+On the MCP path the gateway accepts one JSON-RPC 2.0 object per `POST`
+(`application/json`). A JSON-RPC **batch**, malformed JSON, or a body sent under
+the wrong content-type is refused with HTTP 400 / JSON-RPC `-32600` — it cannot
+be parsed into a `tools/call`, so it could not be checked against tool policy.
+(`PARAPETAI_MODE=monitor` logs it and lets it through, like every other block.)
+
 ## Credentials
 
 `PARAPETAI_CREDENTIAL_MODE` defaults to `passthrough`: the caller's own

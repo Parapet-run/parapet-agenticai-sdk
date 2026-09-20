@@ -136,6 +136,16 @@ class Settings:
     observation_capture: bool = field(
         default_factory=lambda: os.getenv("PARAPETAI_OBSERVATION_CAPTURE", "true").lower() == "true"
     )
+    # Mirrors GovernanceHook's opt-in `vendor_scoped_resources` flag (see
+    # parapetai_agent.policy.hooks.GovernanceHook._build_resource). Off by
+    # default for the same reason as in-process: a tenant's existing
+    # `resource == Resource::"<provider>"` policies stop matching the moment
+    # a tool call's resource becomes `<vendor_system>/<vendor_operation>`.
+    vendor_scoped_resources: bool = field(
+        default_factory=lambda: (
+            os.getenv("PARAPETAI_VENDOR_SCOPED_RESOURCES", "false").lower() == "true"
+        )
+    )
     # "none" (default): the /mcp path is reachable with no bearer credential at
     # all -- today's behaviour, unchanged. Cedar is still the real gate either
     # way (agent_id is an unverified path claim regardless of this setting,

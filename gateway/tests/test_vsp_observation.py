@@ -7,19 +7,12 @@ an ObservedCall directly and exports it as a standalone
 "parapetai.observed_call" span via parapetai_agent.observation.
 emit_observed_span.
 
-One shared TracerProvider/InMemorySpanExporter for the whole module, not one
-per test -- see tests/test_govern.py's own TestOtelSpans class in the SDK
-repo for why: opentelemetry.trace.ProxyTracer (what
-`trace.get_tracer(__name__)` returns, and what server/app.py's module-level
-`_tracer` is) permanently caches the first real Tracer it resolves against,
-so a second `set_tracer_provider()` call later in the same process is
-invisible to an already-resolved ProxyTracer. This module is the only place
-in the gateway's whole test suite that ever triggers a real span through
-that module-level `_tracer` (every other gateway test leaves
-PARAPETAI_AGENT_ID unset, which _observe_mcp_call's own guard treats as
-"nothing to key a bucket on, skip"), so setting the provider once at import
-time is both correct and sufficient -- no earlier test can have already
-locked the proxy to some other provider.
+The TracerProvider/InMemorySpanExporter is installed once for the whole gateway
+suite in conftest.py, not here: server/app.py's module-level `_tracer` is a
+ProxyTracer that permanently caches the first real Tracer it resolves, and
+since every proxied request now opens a decision span, any test module could
+be first to resolve it. This module reads the shared exporter and filters to
+"parapetai.observed_call" so decision spans don't interfere.
 """
 
 from __future__ import annotations
@@ -32,20 +25,15 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 from httpx import Response
-from opentelemetry import trace as otel_trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from parapetai_gateway.server.app import create_app
 
 from parapetai_agent.policy.engine import PolicyEngine
 
+from .conftest import SPAN_EXPORTER
+
 POLICIES = Path(__file__).resolve().parents[2] / "policies"
 
-_SPAN_EXPORTER = InMemorySpanExporter()
-_TRACER_PROVIDER = TracerProvider()
-_TRACER_PROVIDER.add_span_processor(SimpleSpanProcessor(_SPAN_EXPORTER))
-otel_trace.set_tracer_provider(_TRACER_PROVIDER)
+_SPAN_EXPORTER = SPAN_EXPORTER
 
 _TOOL_CALL = {
     "jsonrpc": "2.0",

@@ -60,6 +60,18 @@ decision span carries, in the content-free spirit:
 - **policy generation / bundle digest** — which policy version enforced
 - **latency** — how long the decision took
 
+### From the gateway
+
+`parapetai-gateway` drives the same `GovernanceHook` as the in-process
+adapters, so a proxied request produces the same span
+(`parapetai.tool_call` / `parapetai.model_call`, plus the OpenInference span
+kind) and the same `decision` audit record. The audit LogRecord is emitted
+inside that span, so it carries the trace and span id and correlates with it.
+Gateway decisions are tagged `framework = "gateway"`, and evaluate at
+`stage = "pre"`, exactly as an in-process request-side decision does. The
+gateway also adds `method`, `path` and (for MCP) `mcp_target` to the Cedar
+context.
+
 What it never contains: the prompt text, the tool arguments' values, or the
 model's response. Only the shape of the decision crosses the wire.
 
