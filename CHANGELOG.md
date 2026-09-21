@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A bare `pip install parapetai-agent` could not be imported.** `import
+  parapetai_agent` raised `ModuleNotFoundError: No module named
+  'opentelemetry.sdk'` (0.14.x and 0.15.0): `governance_runtime` imported the
+  OpenTelemetry SDK at module level, but the base install carries
+  `opentelemetry-api` only, by design. The SDK is now imported inside
+  `configure_otel()`, the one place that needs it, and asking for telemetry
+  export without it raises an `ImportError` that says what to install.
+  `Governor.from_control_plane()` on a base install keeps pulling policy,
+  heartbeating and enforcing, and logs
+  `otel_sdk_missing_telemetry_export_disabled` instead of failing to start
+  (enforcement must never depend on telemetry).
+
+### Added
+- **`otel` extra**: the OpenTelemetry SDK and OTLP exporter on their own, for
+  decision export to a control plane or collector without an agent framework
+  (`pip install "parapetai-agent[otel]"`). The framework extras already include
+  the same pair.
+- **`make smoke-base`** (run in CI): builds the wheel and installs it, alone,
+  into a clean virtualenv, then imports it and enforces a policy. The dev
+  environment has every extra, so nothing in the test suite could notice the
+  base install had stopped importing.
+
 ## [0.15.0]
 
 ### Added

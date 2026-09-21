@@ -36,3 +36,6 @@ _to_delete/
 # alongside them IS meant to be committed.
 gateway/deploy/azure/.last-manifest-*.yaml
 gateway/deploy/azure/.gateway-agent.env
+
+# make smoke-base scratch
+.smoke/

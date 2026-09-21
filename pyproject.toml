@@ -89,6 +89,14 @@ langgraph = [
 # IdentityMiddleware but never both. Safe to widen: identity_middleware.py
 # touches only BaseHTTPMiddleware, Request, Response and ASGIApp -- the stable
 # core that did not change shape in starlette 1.x.
+# Just the OpenTelemetry SDK + OTLP exporter, for export to a control plane or collector
+# WITHOUT pulling in an agent framework. The base install carries opentelemetry-api only
+# (a verified no-op), so decisions are enforced and audited locally either way; this is
+# what makes them leave the process. The maf/adk/langgraph extras include the same pair.
+otel = [
+    "opentelemetry-sdk>=1.27,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27,<2.0",
+]
 web = ["starlette>=0.38,<2.0"]
 # response_judge.py's 'litellm' backend ONLY -- the provider-agnostic judge
 # (Anthropic, Bedrock, Vertex, Groq, Ollama, ...) through one code path instead

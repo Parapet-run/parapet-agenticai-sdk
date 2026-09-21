@@ -41,11 +41,6 @@ import structlog
 from opentelemetry import trace
 from opentelemetry._logs import Logger as _OtelLogger
 from opentelemetry._logs import SeverityNumber
-from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import ConsoleLogExporter, SimpleLogRecordProcessor
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 
 import parapetai_agent.policy as parapetai_agent_policy
 from parapetai_agent._exceptions import GovernanceDenied as GovernanceDenied
@@ -54,9 +49,25 @@ from parapetai_agent.policy.hooks import content_free
 from parapetai_agent.providers.parsers import Snapshot
 
 if TYPE_CHECKING:
+    # Annotation-only. The OpenTelemetry SDK is deliberately NOT imported at module
+    # level: the base install carries only opentelemetry-api (see pyproject.toml),
+    # and this module is imported by `import parapetai_agent` itself. A top-level
+    # SDK import here made the bare package unimportable, so every SDK name is
+    # imported inside configure_otel(), the one place that needs it.
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk.trace import TracerProvider
+
     from parapetai_agent.observation import CollectionBudget
 
 log = structlog.get_logger(__name__)
+
+# What to tell someone who reaches telemetry export without the OpenTelemetry SDK.
+# Shared by every caller that catches ImportError from configure_otel().
+OTEL_SDK_MISSING_MESSAGE = (
+    "OpenTelemetry export needs the OpenTelemetry SDK, which the base parapetai-agent "
+    "install does not include. Install it with: pip install 'parapetai-agent[otel]' "
+    "(or any framework extra: [maf], [adk], [langgraph])."
+)
 
 # None until configure_otel() runs; _emit_otel_decision() no-ops until then.
 _otel_logger: _OtelLogger | None = None
@@ -526,6 +537,15 @@ def configure_otel(
     NORMAL interpreter exit -- a long-running server should call
     flush_otel() explicitly from ITS OWN shutdown sequence instead (does
     NOT fire on SIGTERM)."""
+    try:
+        from opentelemetry.sdk._logs import LoggerProvider
+        from opentelemetry.sdk._logs.export import ConsoleLogExporter, SimpleLogRecordProcessor
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+    except ImportError as exc:
+        raise ImportError(OTEL_SDK_MISSING_MESSAGE) from exc
+
     resource = Resource.create({"service.name": service_name, "service.namespace": "parapetai"})
 
     tracer_provider = TracerProvider(resource=resource)

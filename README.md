@@ -299,6 +299,7 @@ schema: **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)**.
 |---|---|---|
 | `maf` | `agent-framework`, `mcp`, OpenTelemetry SDK + OTLP exporter | Microsoft Agent Framework integration and OTel export |
 | `adk` | `google-adk`, OpenTelemetry SDK + OTLP exporter | Google ADK integration and OTel export |
+| `otel` | OTel SDK + OTLP exporter | Just decision telemetry export (to a control plane or collector), with no agent framework. The `maf`/`adk`/`langgraph` extras already include it |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction |
 | `judge` | `litellm` | The provider-agnostic SLM-judge backend — Anthropic, Bedrock, Vertex, Groq, Ollama. Not needed for the default `slm` backend, which speaks the OpenAI wire. |
 | _(base)_ | `cedarpy`, `httpx`, `cryptography`, `opentelemetry-api` | Cedar engine, control-plane protocol client, Ed25519 PEP identity |

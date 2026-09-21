@@ -1,4 +1,4 @@
-.PHONY: install test test-sdk test-gateway lint typecheck check conformance docs docs-serve
+.PHONY: install test test-sdk test-gateway smoke-base lint typecheck check conformance docs docs-serve
 
 # This repo is a uv workspace: the root package (parapetai-agent, the
 # in-process PEP) plus two members -- gateway/ (the proxy PEP, same Cedar
@@ -14,6 +14,14 @@ test: test-sdk test-gateway
 
 test-sdk:
 	uv run --extra maf --extra adk --extra langgraph --extra judge --extra dev pytest tests -q
+
+smoke-base: ## the built wheel imports and enforces in a CLEAN venv with NO extras (guards the base install)
+	rm -rf .smoke && mkdir .smoke
+	uv build --package parapetai-agent --out-dir .smoke/dist
+	uv venv .smoke/venv
+	uv pip install --python .smoke/venv/bin/python .smoke/dist/*.whl
+	.smoke/venv/bin/python tests/smoke_base_install.py policies
+	rm -rf .smoke
 
 test-gateway:
 	uv run --package parapetai-gateway --extra dev pytest gateway/tests -q

@@ -36,6 +36,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from opentelemetry import context as _otel_context_api
 from opentelemetry import trace as _otel_trace
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 from parapetai_agent import observation as _observation
 from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequired
 from parapetai_agent.content_checks import ContentCheckConfig
+from parapetai_agent.governance_runtime import OTEL_SDK_MISSING_MESSAGE
 from parapetai_agent.governance_runtime import configure_otel as _configure_otel
 from parapetai_agent.governance_runtime import (
     enable_automatic_detection as _enable_automatic_detection,
@@ -77,6 +79,8 @@ __all__ = ["Governor", "GovernanceDenied", "GovernanceReviewRequired"]
 # the audit record is content-free (parapetai_agent.policy.hooks.content_free).
 _PREVIEW = 4000
 _PROVIDER = "govern"
+
+log = structlog.get_logger(__name__)
 
 # One CostTracker per process -- same module-level-singleton pattern as
 # maf.py/adk.py/langgraph.py's own _cost_tracker; trace_id is globally
@@ -373,11 +377,20 @@ class Governor:
             # earlier configure_otel() call, or to one of those already
             # having run in the same process.
             console, _ = _resolve_local_output_settings(None, None)
-            _configure_otel(
-                otlp_endpoint=os.environ.get("PARAPETAI_OTLP_ENDPOINT") or url,
-                otlp_headers={"Authorization": f"Bearer {secret}"},
-                console=console,
-            )
+            try:
+                _configure_otel(
+                    otlp_endpoint=os.environ.get("PARAPETAI_OTLP_ENDPOINT") or url,
+                    otlp_headers={"Authorization": f"Bearer {secret}"},
+                    console=console,
+                )
+            except ImportError:
+                # A base install has no OpenTelemetry SDK. Enforcement must never
+                # depend on telemetry, so keep enforcing (policy is still pulled and
+                # heartbeats still sent) and say plainly what is missing: decisions
+                # just are not exported to the control plane until it is installed.
+                log.warning(
+                    "otel_sdk_missing_telemetry_export_disabled", hint=OTEL_SDK_MISSING_MESSAGE
+                )
 
         # Constructed unconditionally, then populated from every fetched
         # bundle -- same contract as build_middleware: an SDK new enough to

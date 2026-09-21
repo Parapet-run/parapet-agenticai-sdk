@@ -173,6 +173,7 @@ from `src/parapetai_agent/policy/engine.py`'s own header and `docs/adr/`.
 | `maf` | `agent-framework`, `mcp`, OTel SDK + OTLP exporter | Microsoft Agent Framework integration and OTel export |
 | `adk` | `google-adk`, OTel SDK + OTLP exporter | Google ADK integration and OTel export |
 | `langgraph` | `langchain`, OTel SDK + OTLP exporter | LangGraph/LangChain integration (`ParapetAgentMiddleware`) and OTel export |
+| `otel` | OTel SDK + OTLP exporter | Just decision telemetry export (to a control plane or collector), with no agent framework. The `maf`/`adk`/`langgraph` extras already include it |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction |
 | `judge` | `litellm` | Provider-agnostic SLM-judge backend (Anthropic, Bedrock, Vertex, Groq, Ollama). Not needed for the default `slm` backend. |
 | `dev` | `pytest`, `ruff`, `mypy`, ... | Local dev / CI only |

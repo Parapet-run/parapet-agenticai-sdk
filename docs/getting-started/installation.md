@@ -31,9 +31,26 @@ pip install "parapetai-agent[adk]"   # Google ADK
 |---|---|---|
 | `maf` | `agent-framework`, `mcp`, OTel SDK + OTLP exporter | Microsoft Agent Framework integration and OTel export |
 | `adk` | `google-adk`, OTel SDK + OTLP exporter | Google ADK integration and OTel export |
+| `otel` | OTel SDK + OTLP exporter | Just decision telemetry export (to a control plane or collector), with no agent framework. The `maf`/`adk`/`langgraph` extras already include it |
 | `web` | `starlette` | `IdentityMiddleware`, JWT bearer extraction |
 | `judge` | `litellm` | Provider-agnostic SLM-judge backend (Anthropic, Bedrock, Vertex, Groq, Ollama) — not needed for the default `slm` backend |
 | `dev` | `pytest`, `ruff`, `mypy`, ... | Local development / CI only |
+
+**Telemetry export needs an extra.** The base install enforces policy and audits
+every decision locally (structured logs), and carries only `opentelemetry-api`,
+which is a no-op. Sending decisions as OpenTelemetry spans and logs to a control
+plane or collector needs the OpenTelemetry SDK and OTLP exporter, which the
+framework extras already include and the `otel` extra provides on its own:
+
+```bash
+pip install "parapetai-agent[otel]"
+```
+
+Without it, everything still works: `Governor.from_control_plane()` keeps pulling
+policy, sending heartbeats and enforcing, and logs
+`otel_sdk_missing_telemetry_export_disabled` to say decisions are not being
+exported. Calling `configure_otel()` directly raises an `ImportError` that names
+this extra.
 
 `maf` and `adk` are mutually independent: `pip install parapetai-agent[adk]`
 alone must work without ever importing `agent_framework`, and vice versa.

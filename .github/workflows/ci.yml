@@ -36,6 +36,13 @@ jobs:
           # pytest.importorskip, same as it always has in CI until now.
           uv pip install "langchain-openai>=1.4,<2.0"
 
+      # The dev environment above has every extra, so it can never notice that the
+      # BASE install (`pip install parapetai-agent`) stopped importing -- which is
+      # exactly what happened when the OpenTelemetry SDK was imported at module
+      # level. This builds the wheel and installs it, alone, into a clean venv.
+      - name: Base install smoke (no extras)
+        run: make smoke-base
+
       # `make check` is lint + typecheck + test across BOTH packages, so CI
       # runs exactly what a contributor runs locally -- one definition, no
       # drift between the two.
