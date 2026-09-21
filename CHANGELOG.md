@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.15.0]
+
+### Added
+- **Optional `details` block on the fleet heartbeat.** `send_heartbeat(...,
+  details=...)` and `run_bundle_poller(..., details_provider=...)` let a PEP
+  attach kind-specific, content-free status to the heartbeat it already sends.
+  `parapetai-gateway` uses it to report its TLS certificates, rotations and
+  which agents connect through it, so a control plane can show a gateway as
+  more than "a PEP is alive". Backward compatible in both directions: `details`
+  is omitted from the request body entirely when not given (every existing
+  caller sends byte-for-byte what it always did), and a control plane that
+  predates the field ignores it. A `details_provider` that raises costs that
+  cycle its details, never the heartbeat.
+
 ## [0.14.1]
 
 ### Added
