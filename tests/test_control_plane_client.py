@@ -263,6 +263,154 @@ def test_send_heartbeat_posts_expected_shape() -> None:
 
 
 @respx.mock
+def test_send_heartbeat_omits_details_entirely_when_none_are_given() -> None:
+    """Every existing caller must send byte-for-byte what it always sent, so a
+    control plane that predates `details` sees no new key at all."""
+    route = respx.post(f"{CONTROL_PLANE_URL}/api/v1/fleet/heartbeat").mock(
+        return_value=Response(200, json={"status": "ok"})
+    )
+
+    send_heartbeat(
+        CONTROL_PLANE_URL,
+        "s",
+        pep_id="p",
+        version="v",
+        policy_generation=1,
+        bundle_digest="d",
+        mode="enforce",
+    )
+
+    assert "details" not in json.loads(route.calls.last.request.content)
+
+
+@respx.mock
+def test_send_heartbeat_includes_details_when_given_and_survives_odd_values() -> None:
+    route = respx.post(f"{CONTROL_PLANE_URL}/api/v1/fleet/heartbeat").mock(
+        return_value=Response(200, json={"status": "ok"})
+    )
+
+    send_heartbeat(
+        CONTROL_PLANE_URL,
+        "s",
+        pep_id="p",
+        version="v",
+        policy_generation=1,
+        bundle_digest="d",
+        mode="enforce",
+        details={"kind": "gateway", "when": Path("/x")},  # not JSON-native
+    )
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["details"] == {"kind": "gateway", "when": "/x"}
+
+
+@respx.mock
+def test_a_details_provider_that_raises_costs_only_the_details(tmp_path: Path) -> None:
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(
+        return_value=Response(
+            200,
+            json={
+                "agent_id": "pa-1",
+                "digest": "d1",
+                "files": {
+                    "00-base.cedar": "permit (principal, action, resource);",
+                    "entities.json": "[]",
+                },
+            },
+        )
+    )
+    stop_event = threading.Event()
+    bodies: list[dict[str, object]] = []
+
+    def _capture(request: object) -> Response:
+        bodies.append(json.loads(request.content))  # type: ignore[attr-defined]
+        stop_event.set()
+        return Response(200, json={"status": "ok"})
+
+    respx.post(f"{CONTROL_PLANE_URL}/api/v1/fleet/heartbeat").mock(side_effect=_capture)
+    policy_dir = tmp_path / "policies"
+    sync_bundle_to_disk(
+        {
+            "files": {
+                "00-base.cedar": "permit (principal, action, resource);",
+                "entities.json": "[]",
+            }
+        },
+        policy_dir,
+    )
+
+    def _boom() -> dict[str, object]:
+        raise RuntimeError("status collector broke")
+
+    run_bundle_poller(
+        CONTROL_PLANE_URL,
+        "s",
+        policy_dir,
+        interval_s=0.01,
+        engine=PolicyEngine(policy_dir, policy_dir / "entities.json"),
+        pep_id="pep-1",
+        version="v",
+        mode="enforce",
+        stop_event=stop_event,
+        details_provider=_boom,
+    )
+
+    assert len(bodies) == 1  # the heartbeat still went out
+    assert "details" not in bodies[0]
+
+
+@respx.mock
+def test_a_details_provider_result_rides_the_polling_loop_heartbeat(tmp_path: Path) -> None:
+    respx.get(f"{CONTROL_PLANE_URL}/api/v1/bundle").mock(
+        return_value=Response(
+            200,
+            json={
+                "agent_id": "pa-1",
+                "digest": "d1",
+                "files": {
+                    "00-base.cedar": "permit (principal, action, resource);",
+                    "entities.json": "[]",
+                },
+            },
+        )
+    )
+    stop_event = threading.Event()
+    bodies: list[dict[str, object]] = []
+
+    def _capture(request: object) -> Response:
+        bodies.append(json.loads(request.content))  # type: ignore[attr-defined]
+        stop_event.set()
+        return Response(200, json={"status": "ok"})
+
+    respx.post(f"{CONTROL_PLANE_URL}/api/v1/fleet/heartbeat").mock(side_effect=_capture)
+    policy_dir = tmp_path / "policies"
+    sync_bundle_to_disk(
+        {
+            "files": {
+                "00-base.cedar": "permit (principal, action, resource);",
+                "entities.json": "[]",
+            }
+        },
+        policy_dir,
+    )
+
+    run_bundle_poller(
+        CONTROL_PLANE_URL,
+        "s",
+        policy_dir,
+        interval_s=0.01,
+        engine=PolicyEngine(policy_dir, policy_dir / "entities.json"),
+        pep_id="pep-1",
+        version="v",
+        mode="enforce",
+        stop_event=stop_event,
+        details_provider=lambda: {"kind": "gateway", "site": "test"},
+    )
+
+    assert bodies[0]["details"] == {"kind": "gateway", "site": "test"}
+
+
+@respx.mock
 def test_send_heartbeat_failure_does_not_raise() -> None:
     respx.post(f"{CONTROL_PLANE_URL}/api/v1/fleet/heartbeat").mock(return_value=Response(500))
 

@@ -343,6 +343,7 @@ def send_heartbeat(
     bundle_digest: str,
     mode: str,
     private_key: Ed25519PrivateKey | None = None,
+    details: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """POSTs to /api/v1/fleet/heartbeat -- what makes this PEP show up on
     the control plane's dashboard "Fleet" table at all; that table already
@@ -359,6 +360,12 @@ def send_heartbeat(
     payload would be signing something that isn't provably what's on the
     wire.
 
+    `details`, when given, is an OPTIONAL extra block of PEP-specific,
+    content-free status (the standalone gateway reports its TLS state and
+    which identities are connected). It is omitted from the body entirely when
+    None, so every existing caller sends byte-for-byte what it always did, and
+    a control plane that predates the field simply ignores it.
+
     Returns the parsed response body on success -- run_bundle_poller reads
     `rotate_key` off it to act on an operator's control-plane-initiated
     rotation request (parapetai_control/agent_auth.py); callers that don't care are
@@ -371,7 +378,9 @@ def send_heartbeat(
         "bundle_digest": bundle_digest,
         "mode": mode,
     }
-    body_bytes = json.dumps(body).encode()
+    if details is not None:
+        body["details"] = dict(details)
+    body_bytes = json.dumps(body, default=str).encode()
     headers = {"Authorization": f"Bearer {agent_secret}", "Content-Type": "application/json"}
     if private_key is not None:
         headers.update(pep_identity.sign_headers(private_key, "POST", path, body_bytes))
@@ -576,6 +585,16 @@ class ReviewClient:
         )
 
 
+def _safe_details(provider: Callable[[], Mapping[str, Any]] | None) -> Mapping[str, Any] | None:
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception:  # status is best-effort; it must never cost the heartbeat
+        log.exception("heartbeat_details_failed")
+        return None
+
+
 def run_bundle_poller(
     control_plane_url: str,
     agent_secret: str,
@@ -592,6 +611,7 @@ def run_bundle_poller(
     persist_to_disk: bool = True,
     on_bundle: Callable[[dict[str, str]], None] | None = None,
     on_bundle_meta: Callable[[dict[str, Any]], None] | None = None,
+    details_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> None:
     """Blocking poll loop -- run this in a daemon thread, same shape as
     parapetai_gateway.server.main._watch(). `stop_event` (a threading.Event) is
@@ -629,6 +649,10 @@ def run_bundle_poller(
     build_middleware for the two real call sites), not generated fresh
     here every cycle.
 
+    details_provider, when given, is called once per cycle and its result is
+    sent as the heartbeat's optional `details` block (see send_heartbeat). A
+    provider that raises costs that cycle its details, never the heartbeat.
+
     An operator's control-plane-initiated "trigger rotation"
     (parapetai_control/agent_auth.py) arrives as `rotate_key: true` in a heartbeat's
     response body -- checked only when BOTH private_key and key_path are
@@ -655,6 +679,7 @@ def run_bundle_poller(
         )
         if engine is not None and pep_id:
             status = engine.status
+            details = _safe_details(details_provider)
             hb_result = send_heartbeat(
                 control_plane_url,
                 agent_secret,
@@ -664,6 +689,7 @@ def run_bundle_poller(
                 bundle_digest=status["digest"],
                 mode=mode,
                 private_key=current_key,
+                details=details,
             )
             if hb_result and hb_result.get("rotate_key") and current_key is not None:
                 if key_path is not None:
