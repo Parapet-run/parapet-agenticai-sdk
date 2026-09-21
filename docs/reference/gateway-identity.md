@@ -119,13 +119,84 @@ supply `X-Client-Cert` or `X-Forwarded-Client-Cert` to impersonate an agent, and
 the tests send exactly those and confirm they are ignored.
 
 - `required` refuses any handshake with no client certificate. That also refuses
-  a Kubernetes probe that carries none: probe the port with a client certificate,
-  or use `optional`.
+  a Kubernetes or Docker probe, which carries none: give probes their own port
+  with `PARAPETAI_HEALTH_PORT` (see [Deployment](#deployment-what-to-expose)).
 - `optional` lets JWT-only callers share the port. A caller with no certificate
   is unauthenticated, and is refused if verification is required.
-- Behind a TLS-terminating ingress (Azure Container Apps, most L7 load
+- Behind a TLS-terminating ingress (a managed container platform's HTTP ingress, most L7 load
   balancers) the gateway sees plain HTTP and mTLS is unavailable. Use the JWT
   method there. Do not forward a CN in a header and trust it.
+
+## Rotation and reload
+
+The gateway re-reads the mTLS files every `PARAPETAI_TLS_RELOAD_INTERVAL_S`
+seconds (default 30) and, when their **content** changes, swaps in new material
+for new connections. No restart, and it covers both the server certificate it
+presents and the client CA it trusts. It compares content, not modification
+times, because a secrets mount (a secrets-store CSI driver, a
+Kubernetes Secret volume) replaces files by repointing a `..data` symlink.
+
+- **A bad rotation never empties trust.** A truncated file, a key that does not
+  match its certificate, or an empty CA makes the *new* material fail to build.
+  That is logged (`tls_reload_failed_keeping_previous`) and the previous
+  material keeps serving; fixing the files retries automatically. Startup is the
+  opposite: unusable material at boot stops the gateway, so it can never come up
+  without client verification.
+- **Rotation is not revocation.** A connection that finished its handshake before
+  the swap keeps the identity it authenticated with until it closes. Dropping a
+  CA stops *new* handshakes from it at once, not connections already open. Bound
+  that with short certificate lifetimes, not with reload.
+- To rotate a client CA without breaking agents, publish a bundle holding the
+  old **and** the new CA, move agents to certificates from the new one, then
+  publish the new CA alone.
+
+## Deployment: what to expose
+
+An internet-facing gateway has up to two listeners, and they must not be confused:
+
+| Listener | Setting | TLS | Expose it? |
+|---|---|---|---|
+| Agent-facing | `PARAPETAI_PORT` | mTLS (`PARAPETAI_TLS_*`) | Yes: this is the one a load balancer maps |
+| Health | `PARAPETAI_HEALTH_PORT` | plain HTTP, no client cert | **No.** Orchestrator probes only |
+
+The health listener answers `/__parapetai/health` and `/ready` with up/down and
+nothing else: no policy digest, no generation, no paths, no proxying, and every
+other path is a 404. Even so, do not put it behind a Service, load balancer or
+ingress; a kubelet reaches a pod directly and needs none of them.
+
+The control plane never calls either listener. The gateway *pulls* bundles and
+*pushes* heartbeats and telemetry; nothing about the control plane's operation
+requires an inbound path to the gateway.
+
+Set `PARAPETAI_ADMIN_ROUTES=false` on any deployment whose agent-facing port is
+reachable by more than the pod: the default-on `/__parapetai/policies`,
+`/policies/reload` and `/observations` routes are unauthenticated and expose the
+policy digest, its directory, and recent decisions with agent ids.
+
+## What the control plane shows
+
+A gateway authenticates to the control plane as an **agent** and heartbeats like any
+other policy enforcement point, so it appears in the fleet under that agent. There is no
+separate "gateway" identity in the protocol. With a control plane configured it also
+sends a status block with each heartbeat (see
+[the protocol](../CONTROL_PLANE_API.md#optional-details-on-the-heartbeat)):
+
+- **TLS state:** the server certificate it is serving (subject, issuer, serial, expiry),
+  the client CAs it trusts, how many rotations it has applied, and the last rotation
+  error, if any.
+- **Rotation events:** each reload, and each *rejected* reload with its reason (the
+  previous certificate keeps serving).
+- **Which agents are connected:** each identity seen recently, how it was identified
+  (`mtls`, `jwt`, or `path` for an unverified URL claim), and request, denied and held
+  counts.
+- **Refused credentials**, counted by reason only. The callers are unverified, so none
+  are identified.
+
+The block is bounded and content-free. It identifies agents by the id they were bound to
+and never carries a request, a prompt, a tool argument, a token, or key material.
+`PARAPETAI_GATEWAY_SITE` labels where a gateway runs so one control plane can tell several
+apart. Initiating a certificate rotation is done where the certificates live (your secrets
+manager); the control plane shows the result, it does not hold the keys.
 
 ## Requiring verification
 

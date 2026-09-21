@@ -90,10 +90,12 @@ def uvicorn_tls_kwargs(
     """`uvicorn.run()` keyword arguments that enable mTLS. Raises rather than
     starting a half-configured listener: a server that silently ran without
     client verification would look identical to one that worked."""
-    if not cert or not key:
+    if not cert:
         raise RuntimeError(
-            "PARAPETAI_TLS_CLIENT_CA enables mTLS, which also needs "
-            "PARAPETAI_TLS_CERT and PARAPETAI_TLS_KEY (the gateway's own server certificate)"
+            "PARAPETAI_TLS_CLIENT_CA enables mTLS, which also needs PARAPETAI_TLS_CERT (the "
+            "gateway's own server certificate) and PARAPETAI_TLS_KEY -- the key may be omitted "
+            "only when the certificate file also contains the private key, as some "
+            "secrets managers export it"
         )
     modes = {"required": ssl.CERT_REQUIRED, "optional": ssl.CERT_OPTIONAL}
     if client_auth not in modes:

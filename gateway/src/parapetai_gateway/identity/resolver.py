@@ -144,6 +144,14 @@ class IdentityResolver:
         self._mtls = mtls_enabled
         self.require_verified = require_verified
 
+    @property
+    def mtls_enabled(self) -> bool:
+        return self._mtls
+
+    @property
+    def jwt_enabled(self) -> bool:
+        return self._jwt is not None
+
     def resolve(
         self, *, peer_cert_der: bytes | None, identity_token: str | None
     ) -> VerifiedIdentity | None:

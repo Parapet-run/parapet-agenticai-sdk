@@ -17,10 +17,10 @@ Parapet's authorization model on top of OAuth subjects.
 
 State is in-memory and process-local by design -- the same "single-instance,
 not multi-replica" constraint parapet-platform's own control-plane/maf-webapp
-Azure deploys already apply to their SQLite file, for the identical reason
-(no distributed lock). A gateway running with mcp_auth_mode=oauth2 must run
-maxReplicas=1 until this moves to a shared store; see this repo's own
-gateway/deploy/azure/README.md.
+hosted deploys already apply to their SQLite file, for the identical reason
+(no distributed lock). A gateway running with mcp_auth_mode=oauth2 must run as a
+single replica until this moves to a shared store; see the deployment notes for
+your site.
 """
 
 from __future__ import annotations

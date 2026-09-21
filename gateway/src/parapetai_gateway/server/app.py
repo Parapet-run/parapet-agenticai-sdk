@@ -51,6 +51,8 @@ from parapetai_gateway.identity.resolver import (
     build_resolver,
     token_from_header,
 )
+from parapetai_gateway.status import GatewayStatus
+from parapetai_gateway.vendor_map import ToolMap, build_tool_map
 
 # auth-integrations.md §10.16 Phase B: one tracer for the whole module,
 # same per-instrumentation-scope convention every framework adapter in the
@@ -81,6 +83,8 @@ def create_app(
     reviews: ReviewClient | None = None,
     *,
     identity_resolver: IdentityResolver | None = None,
+    tool_map: ToolMap | None = None,
+    status: GatewayStatus | None = None,
 ) -> FastAPI:
     # Fail closed on a misconfigured oauth2 mode rather than silently running
     # an authorization server anyone can complete DCR + /authorize against
@@ -111,6 +115,12 @@ def create_app(
     app = FastAPI(title="Parapet", docs_url="/__parapetai/docs", redoc_url=None)
     app.state.engine = engine
     app.state.identity = resolver
+    # What this gateway reports to the control plane (see parapetai_gateway.status).
+    # None means nothing is recorded, and every call site below tolerates that.
+    app.state.status = status
+    # None unless PARAPETAI_MCP_TOOL_MAP is set: no tool is then classified and
+    # behaviour is unchanged. A malformed map raises here, at startup.
+    app.state.tool_map = tool_map or build_tool_map(settings.mcp_tool_map)
     # None when no control plane is configured -- the gateway then behaves
     # exactly as it did before approvals existed: a review is refused and
     # never queued, because there is no queue and so nobody to ask.
@@ -144,24 +154,36 @@ def create_app(
         status = engine.status
         if status["policy_files"] == 0:
             return JSONResponse({"status": "no policies"}, status_code=503)
+        if not settings.admin_routes:
+            # engine.status carries the policy digest, generation and directory
+            # path: fine for an operator on a private port, not for a listener
+            # that faces agents (or the internet).
+            return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "ready", **status})
 
-    @app.get("/__parapetai/policies")
-    async def policies() -> dict[str, Any]:
-        return engine.status
+    # The routes below expose policy internals (digest, generation, directory),
+    # an unauthenticated policy-reload trigger, and a ring buffer of recent
+    # decisions with agent ids. They were built for a trusted pod-local network
+    # and the conformance harness, so they stay on by default -- but on a
+    # listener reachable by anything else, set PARAPETAI_ADMIN_ROUTES=false.
+    if settings.admin_routes:
 
-    @app.post("/__parapetai/policies/reload")
-    async def reload_policies() -> dict[str, Any]:
-        return engine.reload(force=True)
+        @app.get("/__parapetai/policies")
+        async def policies() -> dict[str, Any]:
+            return engine.status
 
-    # Read-only, no auth: a dev/test surface, not a governed provider route.
-    @app.get("/__parapetai/observations")
-    async def get_observations(agent_id: str | None = None) -> dict[str, Any]:
-        records = list(observations)
-        if agent_id is not None:
-            records = [r for r in records if r["agent_id"] == agent_id]
-        records.reverse()  # most recent first
-        return {"records": records}
+        @app.post("/__parapetai/policies/reload")
+        async def reload_policies() -> dict[str, Any]:
+            return engine.reload(force=True)
+
+        # Read-only, no auth: a dev/test surface, not a governed provider route.
+        @app.get("/__parapetai/observations")
+        async def get_observations(agent_id: str | None = None) -> dict[str, Any]:
+            records = list(observations)
+            if agent_id is not None:
+                records = [r for r in records if r["agent_id"] == agent_id]
+            records.reverse()  # most recent first
+            return {"records": records}
 
     if settings.oauth_enabled:
         _add_oauth_routes(app)
@@ -403,6 +425,13 @@ async def proxy(full_path: str, request: Request) -> Response:
     engine: PolicyEngine = request.app.state.engine
     client: httpx.AsyncClient = request.app.state.http
 
+    # `/__parapetai/` is the gateway's own namespace (see the control routes in
+    # create_app). Anything under it that is not a defined route -- including the
+    # admin routes when PARAPETAI_ADMIN_ROUTES=false -- is not a provider
+    # request and must not be evaluated, parsed and forwarded as one.
+    if full_path == "__parapetai" or full_path.startswith("__parapetai/"):
+        return _error(404, "not_found", "no such gateway endpoint")
+
     # UNAUTHENTICATED: agent_id is a caller-supplied claim, not a verified
     # credential -- see parapetai_agent.identity. Anonymous is still evaluated by Cedar
     # below, never a bypass.
@@ -423,16 +452,16 @@ async def proxy(full_path: str, request: Request) -> Response:
                 identity_token=token_from_header(request.headers.get(settings.identity_header)),
             )
         except IdentityError as exc:
-            return _identity_refusal(exc.status, exc.code)
+            return _identity_refusal(request, exc.status, exc.code)
         if verified is None and resolver.require_verified:
-            return _identity_refusal(401, "identity_required")
+            return _identity_refusal(request, 401, "identity_required")
         if verified is not None:
             if caller.agent_id not in (ANONYMOUS, verified.agent_id):
                 # The URL names one agent, the credential proves another.
                 log.warning(
                     "identity_path_mismatch", claimed=caller.agent_id, verified=verified.agent_id
                 )
-                return _identity_refusal(403, "identity_path_mismatch")
+                return _identity_refusal(request, 403, "identity_path_mismatch")
             caller = dataclasses.replace(caller, agent_id=verified.agent_id)
 
     raw = await request.body()
@@ -513,6 +542,16 @@ async def proxy(full_path: str, request: Request) -> Response:
     # coverage matrix can tell a gateway-enforced call from "no framework
     # identity was sent".
     snapshot.framework = "gateway"
+    tool_map: ToolMap | None = request.app.state.tool_map
+    if tool_map is not None and snapshot.provider == "mcp" and snapshot.tool_name:
+        # Operator-declared, so nothing the caller sends can influence it: the
+        # lookup keys are the tool name and the target from the URL, and the
+        # arguments are only ever read to pick a verb for a generic tool.
+        facts = tool_map.resolve(mcp_target, snapshot.tool_name, snapshot.tool_args)
+        if facts is not None:
+            snapshot.vendor_system = facts.vendor_system
+            snapshot.vendor_operation = facts.vendor_operation
+            snapshot.crud_action = facts.crud_action
     if verified is not None:
         # The same three fields governed_identity()/identity_from_bearer_token()
         # fill in-process, from the same claim mapping.
@@ -554,6 +593,14 @@ async def proxy(full_path: str, request: Request) -> Response:
             span.set_status(_otel_trace.Status(_otel_trace.StatusCode.ERROR, decision.reason))
 
     client_name, client_version = fingerprint(request.headers)
+    report: GatewayStatus | None = request.app.state.status
+    if report is not None:
+        report.record_request(
+            agent_id=caller.agent_id,
+            method=verified.method if verified else "path",
+            subject=verified.subject if verified else None,
+            effect=decision.effect,
+        )
     if settings.log_prompts:
         _log_prompt_content(caller, snapshot, decision)
     _record_observation(
@@ -764,11 +811,14 @@ def _passthrough_headers(headers: httpx.Headers) -> dict[str, str]:
 # ── responses ────────────────────────────────────────────────────────
 
 
-def _identity_refusal(status: int, code: str) -> JSONResponse:
+def _identity_refusal(request: Request, status: int, code: str) -> JSONResponse:
     """401 (no/invalid credential) or 403 (valid but not permitted). `code` is
     a stable, deliberately uninformative string -- the reason a credential
     failed is logged, not returned, so a response cannot be used to probe."""
     headers = {"www-authenticate": "Bearer"} if status == 401 else {}
+    report: GatewayStatus | None = request.app.state.status
+    if report is not None:
+        report.record_identity_refusal(code)
     return JSONResponse(
         {"error": {"type": code, "message": "identity could not be verified"}},
         status_code=status,

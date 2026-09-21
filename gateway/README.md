@@ -50,6 +50,14 @@ real credential instead, then maps it to an agent through explicit bindings. A
 bad credential is refused and never falls back to the URL claim. Off unless
 configured; see [`docs/reference/gateway-identity.md`](../docs/reference/gateway-identity.md).
 
+## Vendor tool mapping
+
+An MCP `tools/call` carries only a tool name. `PARAPETAI_MCP_TOOL_MAP` lets you
+declare what each tool does against which vendor (`salesforce` / `Case` /
+`delete`), so Cedar can allow a Salesforce read and refuse a Salesforce delete.
+The operator declares it; the caller cannot influence it. See
+[`docs/reference/vendor-calls.md`](../docs/reference/vendor-calls.md#gateway-mcp-tool-mapping).
+
 ## Credentials
 
 `PARAPETAI_CREDENTIAL_MODE` defaults to `passthrough`: the caller's own

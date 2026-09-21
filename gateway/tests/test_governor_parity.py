@@ -145,7 +145,7 @@ def test_vendor_scoped_resources_is_reachable_from_the_gateway(
     scoped: bool,
     expected: str,
 ) -> None:
-    # No tool->vendor mapping exists yet, so a tool call with the flag on must
+    # No PARAPETAI_MCP_TOOL_MAP is set here, so a tool call with the flag on must
     # land on the fail-closed `undeclared` resource, never silently fall back
     # to the provider-scoped one (hooks.py finding #11).
     _tool_call(_client(monkeypatch, vendor_scoped_resources=scoped))

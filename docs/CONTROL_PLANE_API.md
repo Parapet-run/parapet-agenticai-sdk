@@ -53,6 +53,35 @@ callable with an agent secret, and are deliberately not documented here: an
 adopter never needs them, and this SDK never calls them. `agent_id` and
 `agent_secret` are issued to you once at provisioning, out of band.
 
+#### Optional `details` on the heartbeat
+
+`POST /api/v1/fleet/heartbeat` may carry an optional `details` object: kind-specific,
+content-free status. It is **omitted entirely** by every PEP that has nothing extra to
+say, so an existing PEP sends exactly what it always did, and a control plane that
+predates the field ignores it. Today only `parapetai-gateway` sends one
+(`"kind": "gateway"`):
+
+```json
+{
+  "kind": "gateway", "schema": 1, "site": "site-a",
+  "config": {"mtls": true, "client_auth": "required", "identity_required": true},
+  "tls": {"generation": 3, "last_reload_at": 1789900000.0, "last_error": null,
+          "server_cert": {"subject": "gw.example.com", "issuer": "…", "serial": "…",
+                          "sha256": "…", "not_before": 0.0, "not_after": 0.0},
+          "client_ca": [{"subject": "…", "sha256": "…", "not_after": 0.0}]},
+  "connected": [{"agent_id": "fib-sales", "method": "mtls", "subject": "fib-sales",
+                 "requests": 41, "denied": 2, "held_for_review": 0,
+                 "first_seen": 0.0, "last_seen": 0.0}],
+  "identity_refusals": {"invalid_token": 2},
+  "recent_events": [{"ts": 0.0, "type": "tls_reloaded", "generation": 3}]
+}
+```
+
+It is **content-free**: agent ids, identity methods, certificate metadata and counts,
+never a request, a prompt, a tool argument, a token, or private key material. A control
+plane should treat it as untrusted network input: store only a known `kind`, cap its
+size, and never merge it across heartbeats (the latest block replaces the previous one).
+
 #### `vendor_scoped_resources` on the bundle response
 
 Since 0.7.0, the `GET /api/v1/bundle` response may carry a top-level

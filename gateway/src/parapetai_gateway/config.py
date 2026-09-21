@@ -146,6 +146,43 @@ class Settings:
             os.getenv("PARAPETAI_VENDOR_SCOPED_RESOURCES", "false").lower() == "true"
         )
     )
+    # Operator-declared vendor/CRUD facts for MCP tools (parapetai_gateway.
+    # vendor_map): inline JSON, or a path to a JSON file. Unset, no tool is
+    # classified and nothing changes. Malformed fails closed at startup.
+    mcp_tool_map: str | None = field(
+        default_factory=lambda: os.getenv("PARAPETAI_MCP_TOOL_MAP") or None
+    )
+    # A SECOND listener serving only /__parapetai/health and /ready, on its own
+    # port, plain HTTP. Needed once the main port terminates TLS and demands
+    # client certificates: a kubelet or Docker health probe carries none, so it
+    # cannot probe the main port. Deliberately tiny -- up/down and nothing else
+    # -- so that it is harmless even if mis-exposed. It is for the orchestrator's
+    # probes, not for the internet and not for agents; never map it to a Service
+    # or load balancer. Unset, no second listener starts.
+    health_port: int | None = field(
+        default_factory=lambda: (
+            int(os.environ["PARAPETAI_HEALTH_PORT"]) if os.getenv("PARAPETAI_HEALTH_PORT") else None
+        )
+    )
+    # False removes /__parapetai/{policies,policies/reload,observations} from
+    # the main listener and trims /ready to a bare status. See create_app.
+    admin_routes: bool = field(
+        default_factory=lambda: os.getenv("PARAPETAI_ADMIN_ROUTES", "true").lower() == "true"
+    )
+    # How often to look for rotated mTLS material (server cert/key, client CA)
+    # and hot-swap it in. 0 disables reload (rotation then needs a restart).
+    tls_reload_interval_s: float = field(
+        default_factory=lambda: float(os.getenv("PARAPETAI_TLS_RELOAD_INTERVAL_S", "30"))
+    )
+    # An opaque label for WHERE this gateway runs ("site-a", "dc1", ...),
+    # supplied by the deployment, never interpreted here. It is reported in the
+    # heartbeat so a control plane fronting several gateways can tell them apart.
+    site: str | None = field(default_factory=lambda: os.getenv("PARAPETAI_GATEWAY_SITE") or None)
+    # How long an identity stays "connected" in the status report after its last
+    # request.
+    connected_window_s: float = field(
+        default_factory=lambda: float(os.getenv("PARAPETAI_GATEWAY_CONNECTED_WINDOW_S", "900"))
+    )
     # ── verified caller identity (parapetai_gateway.identity) ────────────
     # Off unless something below is configured: with none of it set the
     # gateway behaves exactly as before, trusting the /a/{agent_id} path

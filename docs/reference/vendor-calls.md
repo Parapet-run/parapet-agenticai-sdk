@@ -123,6 +123,56 @@ exactly like `tool_name`/`tool_args` do — and, like those two, are
 **never stripped** by `content_free()`, so they remain visible in the
 content-free decision audit.
 
+## Gateway: MCP tool mapping
+
+`parapetai-gateway` cannot decorate a tool — it only sees a `tools/call` naming
+one. Instead the operator declares what each MCP tool does, in
+`PARAPETAI_MCP_TOOL_MAP` (inline JSON, or a path to a JSON file):
+
+```json
+{
+  "salesforce": {
+    "get_case":    {"vendor_system": "salesforce", "resource_type": "Case", "crud_action": "read"},
+    "delete_case": {"vendor_system": "salesforce", "resource_type": "Case", "crud_action": "delete"},
+    "sf_request": {
+      "vendor_system": "salesforce", "resource_type": "Record",
+      "crud_action_from": {"arg": "method",
+        "map": {"GET": "read", "POST": "create", "PATCH": "update", "DELETE": "delete"}}}
+  },
+  "*": {"create_issue": {"vendor_system": "atlassian", "resource_type": "Issue", "crud_action": "create"}}
+}
+```
+
+The first level is the MCP **target** — the `salesforce` in
+`/a/<agent>/mcp/salesforce`. `"*"` matches every target, including a bare
+`/mcp`; a named target wins over `"*"`. The fields are the same as
+`VendorCallSpec`, and land on the same `Snapshot` fields, so a policy written
+for the in-process SDK works unchanged.
+
+- **The operator declares it, not the caller.** The lookup keys are the tool
+  name and the URL's target. A tool argument called `crud_action` cannot
+  override the classification (tested). That makes this a stronger signal than
+  the in-process decorator, whose author is the tool's own author. It is still
+  *declared*, not observed.
+- **A generic tool** (`sf_request(method, path)`) has no single verb.
+  `crud_action_from` derives it from one top-level string argument, compared
+  case-insensitively. A value not in `map`, or no such argument, resolves to
+  `crud_action == "unknown"`, **not** to "unmapped": the vendor is still known,
+  and a rule like `permit … when { context.crud_action == "read" }` correctly
+  refuses it, where dropping the facts would let an unrecognised verb slip past
+  a `forbid … == "delete"`.
+- `crud_action` is a lower-case word (`read`, `create`, `update`, `delete`,
+  `admin` by convention; `unknown` is reserved). Unknown fields, both a literal
+  and a derived verb, or a bad shape all stop the gateway at startup, so a typo
+  cannot leave a tool silently unclassified.
+- A tool with no entry is **undeclared**: no vendor context at all, and with
+  `PARAPETAI_VENDOR_SCOPED_RESOURCES=true` its resource is
+  `Resource::"undeclared"`, which a fail-closed deployment can forbid.
+
+The mapping alone changes no resource, so adding it cannot break an existing
+policy. Turn on `PARAPETAI_VENDOR_SCOPED_RESOURCES` later, once your policies
+target `Resource::"<vendor_system>/<operation>"`.
+
 ## Writing a policy against it
 
 No resource change is required to use the declared facts — they're
@@ -130,7 +180,7 @@ available in `context` immediately:
 
 ```cedar
 forbid(principal, action == Action::"tool_call", resource)
-when { context.crud_action == "delete" }
+when { context has crud_action && context.crud_action == "delete" }
 unless { principal in Agent::"role:crm-admin" };
 ```
 
