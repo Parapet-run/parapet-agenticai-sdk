@@ -34,7 +34,23 @@ jobs:
           # exercises the framework-neutral Governor fallback against a real
           # ChatOpenAI. Without this pin that test class silently skips via
           # pytest.importorskip, same as it always has in CI until now.
-          uv pip install "langchain-openai>=1.4,<2.0"
+          #
+          # openai<3 is pinned here too -- not for langchain-openai's own
+          # sake (it accepts >=2.45,<4) but because nothing else in this
+          # graph bounds `openai` either, so an unpinned install lets the
+          # resolver land on whatever's newest on PyPI. openai>=3 defaults
+          # to a new async transport, `httpx2`, as its httpx replacement;
+          # httpx2 2.13.0 shipped an async-teardown regression that races
+          # pytest-asyncio's event-loop close and fails
+          # TestLangGraph::test_denied_tool_is_blocked with `RuntimeError:
+          # Event loop is closed` -- unrelated to anything this repo
+          # governs. `uv pip install` also never prunes an
+          # already-installed package once a later pin (like the
+          # agent-framework one above) stops needing it, so a prior step
+          # landing on openai>=3 leaves httpx2 installed even after openai
+          # itself gets pinned back down -- pin openai directly so the
+          # resolver never reaches for it in the first place.
+          uv pip install "langchain-openai>=1.4,<2.0" "openai<3"
 
       # The dev environment above has every extra, so it can never notice that the
       # BASE install (`pip install parapetai-agent`) stopped importing -- which is
