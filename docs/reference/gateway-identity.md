@@ -11,12 +11,18 @@ behaves exactly as it always has.
 
 ## What it does
 
-A request can carry one of two credentials:
+A request can carry one of three credentials:
 
 | Method | Proves | Where it is read from |
 |---|---|---|
 | **mTLS** | The caller holds a private key for a certificate your CA signed | The TLS handshake, terminated in the gateway itself |
 | **JWT** | Your IdP (Entra, Okta, …) issued this token to this application | The `X-Parapetai-Identity` header |
+| **Shared secret** | The caller holds a per-agent bearer secret the gateway knows the hash of | The `X-Parapetai-Identity` header, same as JWT |
+
+mTLS is the default and strongest method (a private key, never transmitted).
+Shared secret exists only for a caller that can present neither a client
+certificate nor an IdP token — see [Shared secret](#shared-secret-additive-off-by-default) below;
+it is strictly additive and off by default.
 
 Either way, proof of *who the caller is* is not enough to pick a policy. A
 **binding** maps that identity to a Parapet `agent_id`, and only a binding says
@@ -41,8 +47,9 @@ whatever the token or URL said.
 | A credential is presented but invalid | **`401`.** It never falls back to the path claim: garbage must not be a way to downgrade |
 | Valid, but no binding for it | **`403`** `identity_not_bound` |
 | Valid, but the URL names a different agent | **`403`** `identity_path_mismatch` |
-| mTLS and JWT both valid, different agents | **`403`** `identity_conflict` |
+| mTLS and a header credential (JWT or secret) both valid, different agents | **`403`** `identity_conflict` |
 | Certificate has no CN, or more than one | `401` (there is no defensible "which one") |
+| A shared secret that isn't a bound one, or is garbage | **`401`** `invalid_secret` (never `403`: there is no separate "verify, then check binding" step for a secret, so wrong and unbound are the same case) |
 
 The response never says *why* a token failed (expired, bad signature, wrong
 audience): that goes to the gateway's log, so a caller can't use it to probe.
@@ -126,6 +133,48 @@ the tests send exactly those and confirm they are ignored.
 - Behind a TLS-terminating ingress (a managed container platform's HTTP ingress, most L7 load
   balancers) the gateway sees plain HTTP and mTLS is unavailable. Use the JWT
   method there. Do not forward a CN in a header and trust it.
+
+## Shared secret (additive, off by default)
+
+```bash
+export PARAPETAI_ALLOW_SHARED_SECRET=true
+export PARAPETAI_IDENTITY_BINDINGS=/etc/parapetai/bindings.json
+```
+
+For a caller that can present neither a client certificate nor an IdP token —
+a desktop agent whose MCP client only supports setting a request header, not
+mTLS or a proxy. **Never a replacement for mTLS**: `PARAPETAI_TLS_CLIENT_AUTH`
+still defaults to `required`, and turning this on has no effect for a caller
+with no client certificate until that is also relaxed to `optional` (the
+gateway logs `shared_secret_unreachable` at startup if you set this while
+`required` is still in effect, since no such caller could ever reach it).
+
+A binding looks like the others, with a `secret_hash` instead of a `cn` or
+`issuer`/`subject`:
+
+```json
+{"kind": "secret", "agent_id": "fib-sales-agent",
+ "secret_hash": "…sha256 hexdigest, 64 hex characters…"}
+```
+
+Mint the secret and compute the hash with `generate_secret()`/`hash_secret()`
+(`parapetai_agent.agent_secrets` — the same functions the control plane's own
+agent provisioning uses, so a secret's hash is computed identically on both
+sides regardless of which one issued it). The secret is shown once; only its
+hash is ever stored. The caller sends it as `Bearer <secret>` in the identity
+header — **never `Authorization`**, which in passthrough credential mode
+carries the caller's own upstream credential and must reach the downstream
+server unexamined.
+
+There is no separate "verify, then look up the binding" step the way mTLS/JWT
+have one: the secret's hash *is* the lookup key, so a wrong or garbage secret
+and an unbound one are indistinguishable — both are `401 invalid_secret`.
+
+A single header value is only ever tried as one of JWT or shared secret,
+picked by its shape (a JWT always has exactly two `.` characters; a generated
+secret never does) — a well-formed JWT is never reinterpreted as an opaque
+secret, and vice versa, even when both methods are enabled on the same
+gateway.
 
 ## Rotation and reload
 

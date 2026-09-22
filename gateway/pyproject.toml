@@ -1,6 +1,6 @@
 [project]
 name = "parapetai-gateway"
-version = "0.4.0"
+version = "0.5.0"
 requires-python = ">=3.12"
 description = "Standalone HTTP-interception PEP (base-URL interception, ADR 0002). Depends on parapetai-agent for the Cedar engine, Snapshot/Caller, and the PEP<->control-plane protocol client -- owns none of them itself."
 license = "MIT"
@@ -66,7 +66,7 @@ dependencies = [
     # >=0.15.0: the heartbeat `details` block the gateway uses to report its TLS state and
     # connected agents to the control plane. An older SDK still works (the gateway detects it
     # and reports less), but a fresh install should get the feature.
-    "parapetai-agent>=0.15.0",
+    "parapetai-agent>=0.16.0",  # needs parapetai_agent.agent_secrets (shared-secret identity)
 ]
 
 [tool.uv.sources]

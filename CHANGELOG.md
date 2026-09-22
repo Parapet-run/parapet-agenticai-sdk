@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.16.0]
+
+### Added
+- **`parapetai_agent.agent_secrets`**: `generate_secret()`/`hash_secret()`/
+  `secret_matches()`, the bearer-secret scheme the control plane uses for its
+  own agent provisioning, now single-sourced here (matching `signing.py`'s
+  own history) so a gateway's local shared-secret identity bindings and the
+  control plane always compute the same hash for the same secret.
+- **Gateway: shared-secret identity** (`PARAPETAI_ALLOW_SHARED_SECRET`,
+  off by default, additive to mTLS which stays the default). A caller with
+  no client certificate and no IdP token can authenticate with a per-agent
+  bearer secret, carried in the identity header exactly like a JWT (never
+  `Authorization`, which carries the caller's own upstream credential under
+  passthrough). A new `"secret"` identity-binding kind
+  (`gateway/src/parapetai_gateway/identity/bindings.py`) looks the caller up
+  by the secret's hash directly -- there is no separate "verify, then check
+  the binding" step, so a wrong or unbound secret is `401 invalid_secret`,
+  never `403`. A single header value is only ever tried as one of JWT or
+  shared secret, picked by its shape, so a well-formed JWT is never
+  reinterpreted as an opaque secret even when both methods are enabled on
+  one gateway. See
+  [gateway-identity.md](docs/reference/gateway-identity.md#shared-secret-additive-off-by-default).
+
 ## [0.15.1]
 
 ### Fixed

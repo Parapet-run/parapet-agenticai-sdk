@@ -6,6 +6,14 @@ policy applies. Without an explicit mapping, any identity the IdP will vouch
 for could act as any agent. A binding is that mapping, and a verified
 identity with no binding is refused (403), never defaulted.
 
+A third kind, "secret", has no separate IdP or CA to vouch for it -- the
+bearer secret itself (hashed, via parapetai_agent.agent_secrets) is both the
+proof and the identity, the same "secret alone identifies the agent" model
+the control plane uses for its own PEP authentication. It exists for callers
+that can't present a client certificate and have no IdP token to send (see
+PARAPETAI_ALLOW_SHARED_SECRET in config.py); mTLS stays the default and this
+is strictly additive to it, never a replacement.
+
 Same shape as the `bindings` array in docs/CONTROL_PLANE_API.md's gateway
 config, so the control plane can later deliver the same records this module
 loads from a local file today.
@@ -27,6 +35,11 @@ from parapetai_agent.identity import ANONYMOUS
 # malformed binding rewrite the principal expression.
 _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 
+# hash_secret() output: sha256 hexdigest, always exactly this shape. Checked
+# at load time so a truncated-copy-paste mistake in bindings.json fails
+# closed at startup rather than as a lookup that can never match.
+_SECRET_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 class BindingError(ValueError):
     """A binding record is malformed or ambiguous. Raised at load time so a bad
@@ -35,11 +48,12 @@ class BindingError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Binding:
-    kind: str  # "jwt" | "mtls"
+    kind: str  # "jwt" | "mtls" | "secret"
     agent_id: str
     issuer: str | None = None
     subject: str | None = None
     cn: str | None = None
+    secret_hash: str | None = None
 
 
 class BindingTable:
@@ -50,6 +64,7 @@ class BindingTable:
     def __init__(self, bindings: Iterable[Binding] = ()) -> None:
         self._jwt: dict[tuple[str, str], str] = {}
         self._mtls: dict[str, str] = {}
+        self._secret: dict[str, str] = {}
         for b in bindings:
             self._add(b)
 
@@ -80,8 +95,24 @@ class BindingTable:
                     f"mtls cn {b.cn!r} is bound to both {existing!r} and {b.agent_id!r}"
                 )
             self._mtls[b.cn] = b.agent_id
+        elif b.kind == "secret":
+            if not b.secret_hash:
+                raise BindingError("a secret binding needs `secret_hash`")
+            if not _SECRET_HASH_RE.match(b.secret_hash):
+                raise BindingError(
+                    f"secret_hash for {b.agent_id!r} is not a sha256 hexdigest "
+                    "(expected 64 hex characters) -- see parapetai_agent.agent_secrets.hash_secret"
+                )
+            existing = self._secret.get(b.secret_hash)
+            if existing is not None and existing != b.agent_id:
+                raise BindingError(
+                    f"secret hash is bound to both {existing!r} and {b.agent_id!r}"
+                )
+            self._secret[b.secret_hash] = b.agent_id
         else:
-            raise BindingError(f"unknown binding kind {b.kind!r} (expected 'jwt' or 'mtls')")
+            raise BindingError(
+                f"unknown binding kind {b.kind!r} (expected 'jwt', 'mtls' or 'secret')"
+            )
 
     def agent_for_jwt(self, issuer: str, subject: str) -> str | None:
         return self._jwt.get((issuer, subject))
@@ -89,8 +120,11 @@ class BindingTable:
     def agent_for_mtls(self, cn: str) -> str | None:
         return self._mtls.get(cn)
 
+    def agent_for_secret(self, secret_hash: str) -> str | None:
+        return self._secret.get(secret_hash)
+
     def __len__(self) -> int:
-        return len(self._jwt) + len(self._mtls)
+        return len(self._jwt) + len(self._mtls) + len(self._secret)
 
     @classmethod
     def from_dicts(cls, records: Iterable[Mapping[str, Any]]) -> BindingTable:
@@ -109,6 +143,7 @@ class BindingTable:
                     issuer=_opt_str(record.get("issuer")),
                     subject=_opt_str(record.get("subject")),
                     cn=_opt_str(record.get("cn")),
+                    secret_hash=_opt_str(record.get("secret_hash")),
                 )
             )
         return cls(bindings)

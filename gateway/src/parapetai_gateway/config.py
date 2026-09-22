@@ -244,6 +244,23 @@ class Settings:
     tls_client_auth: str = field(
         default_factory=lambda: os.getenv("PARAPETAI_TLS_CLIENT_AUTH", "required").lower()
     )
+    # Additive to mTLS, never a replacement -- mTLS stays required by default
+    # (tls_client_auth above). A caller with no client certificate and no IdP
+    # token can still authenticate with a per-agent bearer secret (see
+    # identity/bindings.py's "secret" kind and identity/resolver.py), carried
+    # in identity_header exactly like a JWT -- NEVER `authorization`, which in
+    # passthrough credential mode carries the caller's own UPSTREAM
+    # credential and must reach the downstream server unexamined. Off by
+    # default: turning this on for a gateway whose tls_client_auth is
+    # "required" has no effect (that caller's TLS handshake never completes
+    # without a client certificate in the first place) -- see
+    # docs/reference/gateway-identity.md for the tls_client_auth=optional
+    # pairing this needs to actually admit a non-mTLS caller.
+    allow_shared_secret: bool = field(
+        default_factory=lambda: (
+            os.getenv("PARAPETAI_ALLOW_SHARED_SECRET", "false").lower() == "true"
+        )
+    )
 
     @property
     def jwt_identity_enabled(self) -> bool:

@@ -28,6 +28,8 @@ from parapetai_gateway.identity.resolver import (
     token_from_header,
 )
 
+from parapetai_agent.agent_secrets import generate_secret, hash_secret
+
 from .identity_support import (
     AUDIENCE,
     ISSUER,
@@ -154,6 +156,89 @@ def test_no_credential_is_not_an_error() -> None:
     assert _resolver().resolve(peer_cert_der=None, identity_token=None) is None
 
 
+# ── shared-secret identity (additive to mTLS/JWT, off by default) ─────────
+
+
+def _secret_resolver(**kwargs: Any) -> tuple[IdentityResolver, str]:
+    secret = generate_secret()
+    table = BindingTable([Binding("secret", "agent-a", secret_hash=hash_secret(secret))])
+    resolver = IdentityResolver(bindings=table, allow_shared_secret=True, **kwargs)
+    return resolver, secret
+
+
+def test_a_bound_secret_resolves_to_the_bound_agent() -> None:
+    resolver, secret = _secret_resolver()
+
+    identity = resolver.resolve(peer_cert_der=None, identity_token=secret)
+
+    assert identity is not None
+    assert identity.agent_id == "agent-a"
+    assert identity.method == "secret"
+
+
+def test_a_wrong_secret_is_refused_as_invalid_not_unbound() -> None:
+    resolver, _secret = _secret_resolver()
+
+    with pytest.raises(IdentityError) as exc:
+        resolver.resolve(
+            peer_cert_der=None,
+            identity_token="garbage-not-a-real-secret",  # noqa: S106 -- test fixture, not real
+        )
+
+    # No separate "verify, then check binding" step exists for a secret --
+    # wrong and unbound are the same case, so this must be 401 (the
+    # credential itself didn't verify), never 403 identity_not_bound, which
+    # would wrongly imply the gateway recognized who was calling.
+    assert (exc.value.status, exc.value.code) == (401, "invalid_secret")
+
+
+def test_shared_secret_disabled_by_default_needs_an_explicit_flag() -> None:
+    table = BindingTable([Binding("secret", "agent-a", secret_hash=hash_secret("s"))])
+    with pytest.raises(ValueError, match="at least one identity method"):
+        IdentityResolver(bindings=table)  # allow_shared_secret defaults to False
+
+
+def test_a_jwt_shaped_header_is_never_reinterpreted_as_a_secret() -> None:
+    # Both methods enabled on the same gateway: a well-formed JWT must go
+    # through JWT verification, never be hashed and looked up as if it were
+    # an opaque secret, even though shared-secret is also turned on.
+    table = BindingTable(
+        [
+            Binding("jwt", "agent-a", issuer=ISSUER, subject="app-1"),
+            Binding("secret", "agent-b", secret_hash=hash_secret("s")),
+        ]
+    )
+    resolver = IdentityResolver(
+        bindings=table, jwt_verifier=_verifier(), allow_shared_secret=True
+    )
+
+    identity = resolver.resolve(peer_cert_der=None, identity_token=make_token(KEY))
+
+    assert identity is not None
+    assert identity.agent_id == "agent-a"
+    assert identity.method == "jwt"
+
+
+def test_mtls_and_a_conflicting_secret_are_refused_not_merged(tmp_path: Path) -> None:
+    from .identity_support import der_of, issue_client_cert, make_ca
+
+    ca = make_ca(tmp_path, "test-ca")
+    crt, _key = issue_client_cert(ca, tmp_path, "some-cn")
+    secret = generate_secret()
+    table = BindingTable(
+        [
+            Binding("mtls", "agent-cert", cn="some-cn"),
+            Binding("secret", "agent-secret", secret_hash=hash_secret(secret)),
+        ]
+    )
+    resolver = IdentityResolver(bindings=table, mtls_enabled=True, allow_shared_secret=True)
+
+    with pytest.raises(IdentityError) as exc:
+        resolver.resolve(peer_cert_der=der_of(crt), identity_token=secret)
+
+    assert (exc.value.status, exc.value.code) == (403, "identity_conflict")
+
+
 def test_claims_map_the_way_the_in_process_sdk_maps_them() -> None:
     token = make_token(
         KEY, claims={"oid": "user-oid", "tid": "tenant-1", "roles": ["OrderViewer", "Auditor"]}
@@ -220,12 +305,40 @@ def test_the_same_subject_under_a_different_issuer_is_a_different_identity() -> 
     assert table.agent_for_jwt("https://other-tenant.example/", "app-1") is None
 
 
+def test_a_secret_binding_looks_up_by_hash_not_by_agent_id() -> None:
+    secret_hash = hash_secret("s3cret-value")
+    table = BindingTable([Binding("secret", "agent-a", secret_hash=secret_hash)])
+
+    assert table.agent_for_secret(secret_hash) == "agent-a"
+    assert table.agent_for_secret(hash_secret("wrong-value")) is None
+
+
+def test_a_secret_hash_must_look_like_one() -> None:
+    # not 64 hex chars -> reject at load time, not silently at lookup time
+    with pytest.raises(BindingError, match="not a sha256 hexdigest"):
+        BindingTable(
+            [Binding("secret", "agent-a", secret_hash="not-a-real-hash")]  # noqa: S106
+        )
+
+
+def test_the_same_secret_hash_bound_to_two_agents_is_ambiguous_and_rejected() -> None:
+    secret_hash = hash_secret("shared-by-mistake")
+    with pytest.raises(BindingError, match="bound to both"):
+        BindingTable(
+            [
+                Binding("secret", "agent-a", secret_hash=secret_hash),
+                Binding("secret", "agent-b", secret_hash=secret_hash),
+            ]
+        )
+
+
 @pytest.mark.parametrize(
     "record",
     [
         {"kind": "jwt", "agent_id": "a", "issuer": ISSUER},  # no subject
         {"kind": "jwt", "agent_id": "a", "subject": "s"},  # no issuer
         {"kind": "mtls", "agent_id": "a"},  # no cn
+        {"kind": "secret", "agent_id": "a"},  # no secret_hash
         {"kind": "saml", "agent_id": "a"},  # unknown kind
         {"kind": "jwt"},  # no agent_id
     ],
@@ -415,6 +528,48 @@ def test_an_identity_method_with_no_bindings_stops_startup() -> None:
 
     with pytest.raises(RuntimeError, match="IDENTITY_BINDINGS"):
         build_resolver(settings=settings)
+
+
+def test_shared_secret_alone_is_a_sufficient_identity_method(tmp_path: Path) -> None:
+    secret = generate_secret()
+    bindings = tmp_path / "b.json"
+    bindings.write_text(
+        json.dumps([{"kind": "secret", "agent_id": "agent-a", "secret_hash": hash_secret(secret)}])
+    )
+    settings = _settings(
+        allow_shared_secret=True,
+        identity_bindings_path=str(bindings),
+        require_verified_identity=True,
+    )
+
+    resolver = build_resolver(settings=settings)
+
+    assert resolver is not None
+    identity = resolver.resolve(peer_cert_der=None, identity_token=secret)
+    assert identity is not None and identity.agent_id == "agent-a"
+
+
+def test_allow_shared_secret_alongside_required_mtls_warns_but_still_starts(
+    tmp_path: Path,
+) -> None:
+    # Not a startup error (a gateway may legitimately be mid-migration), but
+    # this combination can never admit a shared-secret-only caller: the TLS
+    # handshake with tls_client_auth=required refuses them before any
+    # request-level code runs. Documented in config.py/resolver.py; proven
+    # here so a future change can't silently make this combination fail
+    # closed in a way an operator wouldn't notice.
+    bindings = tmp_path / "b.json"
+    bindings.write_text(json.dumps([{"kind": "mtls", "agent_id": "agent-a", "cn": "c"}]))
+    settings = _settings(
+        tls_client_ca="/dev/null",
+        tls_client_auth="required",
+        allow_shared_secret=True,
+        identity_bindings_path=str(bindings),
+    )
+
+    resolver = build_resolver(settings=settings)
+
+    assert resolver is not None
 
 
 def test_a_complete_config_builds_a_resolver(tmp_path: Path) -> None:

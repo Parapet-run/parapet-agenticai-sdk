@@ -1,10 +1,19 @@
 """Resolve a request's credentials into ONE verified agent identity, or refuse.
 
-Two credential methods, in this order of authority:
+Three credential methods:
 
-1. mTLS  -- the client certificate's CN (validated by the TLS layer).
-2. JWT   -- an IdP-issued token in the identity header, verified against the
-            IdP's published keys.
+1. mTLS    -- the client certificate's CN (validated by the TLS layer).
+2. JWT     -- an IdP-issued token in the identity header, verified against
+              the IdP's published keys.
+3. secret  -- a per-agent bearer secret in the SAME identity header (never
+              `authorization` -- see config.py's allow_shared_secret), for a
+              caller with no client certificate and no IdP token. Disabled by
+              default; mTLS is the one enabled by default and stays that way
+              regardless of whether secret is also turned on. A single header
+              value can only ever be tried as ONE of JWT/secret -- whichever
+              its shape matches (see _looks_like_jwt) -- never both, so a
+              well-formed JWT is never reinterpreted as a bearer secret or
+              vice versa.
 
 Rules that make this safe rather than merely convenient:
 
@@ -28,12 +37,21 @@ from typing import Any
 import jwt
 import structlog
 
+from parapetai_agent.agent_secrets import hash_secret
 from parapetai_agent.token_identity import agent_identity_from_claims, identity_from_claims
 from parapetai_gateway.identity.bindings import BindingTable
 from parapetai_gateway.identity.jwks import KeyProvider
 from parapetai_gateway.identity.mtls import common_name
 
 log = structlog.get_logger(__name__)
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """A JWT is always header.payload.signature -- exactly two dots. A
+    generated bearer secret (secrets.token_urlsafe(32)) never contains one,
+    so this cheaply and reliably tells the two credential shapes apart
+    without attempting to parse either."""
+    return token.count(".") == 2
 
 # Symmetric and "none" algorithms are never acceptable here: verification is
 # against the IdP's PUBLIC keys, and allowing HS* is the classic
@@ -135,13 +153,15 @@ class IdentityResolver:
         jwt_verifier: JwtVerifier | None = None,
         mtls_enabled: bool = False,
         require_verified: bool = False,
+        allow_shared_secret: bool = False,
     ) -> None:
-        if jwt_verifier is None and not mtls_enabled:
+        if jwt_verifier is None and not mtls_enabled and not allow_shared_secret:
             raise ValueError("an IdentityResolver needs at least one identity method")
         # Reassigned wholesale to change bindings (BindingTable is immutable).
         self.bindings = bindings
         self._jwt = jwt_verifier
         self._mtls = mtls_enabled
+        self._allow_secret = allow_shared_secret
         self.require_verified = require_verified
 
     @property
@@ -152,32 +172,50 @@ class IdentityResolver:
     def jwt_enabled(self) -> bool:
         return self._jwt is not None
 
+    @property
+    def shared_secret_enabled(self) -> bool:
+        return self._allow_secret
+
     def resolve(
         self, *, peer_cert_der: bytes | None, identity_token: str | None
     ) -> VerifiedIdentity | None:
         """None means "no credential presented". Anything else is a verified
         identity or an IdentityError -- there is no third outcome."""
         from_cert = self._from_cert(peer_cert_der) if self._mtls and peer_cert_der else None
-        from_token = self._from_token(identity_token) if self._jwt and identity_token else None
+        header_configured = self._jwt is not None or self._allow_secret
+        from_header = (
+            self._from_header(identity_token)
+            if identity_token and header_configured
+            else None
+        )
 
-        if from_cert and from_token:
-            if from_cert.agent_id != from_token.agent_id:
+        if from_cert and from_header:
+            if from_cert.agent_id != from_header.agent_id:
                 log.warning(
                     "identity_conflict",
                     mtls_agent=from_cert.agent_id,
-                    jwt_agent=from_token.agent_id,
+                    header_agent=from_header.agent_id,
                 )
                 raise IdentityError(403, "identity_conflict")
             return VerifiedIdentity(
-                agent_id=from_token.agent_id,
-                method="mtls+jwt",
-                subject=from_token.subject,
-                issuer=from_token.issuer,
-                identity_claims=from_token.identity_claims,
-                identity_roles=from_token.identity_roles,
-                agent_identity_claims=from_token.agent_identity_claims,
+                agent_id=from_header.agent_id,
+                method=f"mtls+{from_header.method}",
+                subject=from_header.subject,
+                issuer=from_header.issuer,
+                identity_claims=from_header.identity_claims,
+                identity_roles=from_header.identity_roles,
+                agent_identity_claims=from_header.agent_identity_claims,
             )
-        return from_cert or from_token
+        return from_cert or from_header
+
+    def _from_header(self, token: str) -> VerifiedIdentity:
+        """Dispatches on the credential's SHAPE, not gateway configuration
+        alone: a JWT-shaped value is always tried as a JWT when JWT identity
+        is enabled, even if shared-secret is also enabled -- a well-formed
+        JWT must never be looked up as if it were an opaque secret."""
+        if self._jwt is not None and (_looks_like_jwt(token) or not self._allow_secret):
+            return self._from_token(token)
+        return self._from_secret(token)
 
     def _from_cert(self, der: bytes) -> VerifiedIdentity:
         cn = common_name(der)
@@ -189,6 +227,19 @@ class IdentityResolver:
             log.warning("identity_unbound", method="mtls", subject=cn)
             raise IdentityError(403, "identity_not_bound")
         return VerifiedIdentity(agent_id=agent_id, method="mtls", subject=cn)
+
+    def _from_secret(self, token: str) -> VerifiedIdentity:
+        # Unlike mTLS/JWT there is no separate "verify, then look up the
+        # binding" step: the secret's hash IS the lookup key, so a wrong or
+        # garbage secret and an unbound one are indistinguishable -- both are
+        # a credential that was presented but did not verify (401), not
+        # identity_not_bound (403), which would wrongly imply the gateway
+        # recognized who was calling.
+        agent_id = self.bindings.agent_for_secret(hash_secret(token))
+        if agent_id is None:
+            log.warning("identity_secret_rejected", reason="unknown or incorrect secret")
+            raise IdentityError(401, "invalid_secret")
+        return VerifiedIdentity(agent_id=agent_id, method="secret", subject=agent_id)
 
     def _from_token(self, token: str) -> VerifiedIdentity:
         assert self._jwt is not None
@@ -264,12 +315,34 @@ def build_resolver(
             keys or JwksKeyProvider(settings.idp_jwks_url),
         )
 
-    if jwt_verifier is None and not settings.mtls_enabled:
+    shared_secret_unreachable = (
+        settings.allow_shared_secret
+        and settings.mtls_enabled
+        and settings.tls_client_auth == "required"
+    )
+    if shared_secret_unreachable:
+        # Not a startup error, but very likely a mistake: PARAPETAI_TLS_CLIENT_AUTH=
+        # required refuses the TLS handshake for a caller with no client
+        # certificate before any request-level code (including this
+        # resolver) ever runs, so a shared-secret-only caller can never
+        # reach it. Warn loudly rather than silently accept a flag that can
+        # never take effect -- see docs/reference/gateway-identity.md.
+        log.warning(
+            "shared_secret_unreachable",
+            reason=(
+                "PARAPETAI_ALLOW_SHARED_SECRET is set but PARAPETAI_TLS_CLIENT_AUTH=required "
+                "refuses every connection with no client certificate at the TLS handshake, "
+                "before a shared secret could ever be checked; set "
+                "PARAPETAI_TLS_CLIENT_AUTH=optional"
+            ),
+        )
+
+    if jwt_verifier is None and not settings.mtls_enabled and not settings.allow_shared_secret:
         if settings.require_verified_identity:
             raise RuntimeError(
                 "PARAPETAI_REQUIRE_VERIFIED_IDENTITY is set but no identity method is "
-                "configured (set PARAPETAI_IDP_* and/or PARAPETAI_TLS_CLIENT_CA); "
-                "every request would be refused"
+                "configured (set PARAPETAI_IDP_*, PARAPETAI_TLS_CLIENT_CA and/or "
+                "PARAPETAI_ALLOW_SHARED_SECRET); every request would be refused"
             )
         return None
 
@@ -286,6 +359,7 @@ def build_resolver(
         jwt_verifier=jwt_verifier,
         mtls_enabled=settings.mtls_enabled,
         require_verified=settings.require_verified_identity,
+        allow_shared_secret=settings.allow_shared_secret,
     )
 
 
