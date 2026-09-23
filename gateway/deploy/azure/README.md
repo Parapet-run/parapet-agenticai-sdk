@@ -171,3 +171,80 @@ sit in front of live, synchronous tool calls from Rovo -- a cold start
 (container pull + bundle fetch + uvicorn boot) mid-OAuth-handshake or
 mid-tool-call is worse here than the small always-on compute cost. Set
 `GATEWAY_MIN_REPLICAS=0` yourself if your use case tolerates the latency.
+
+## AKS deployment (`parapet-gw-aks`) -- separate from the above
+
+**This is a different deployment target than everything above.** The scripts
+in this directory provision the gateway as a standalone Container App; the
+`parapet-gw-aks` AKS cluster (resource group `parapet-rg`, managed resource
+group `MC_parapet-rg_parapet-gw-aks_eastus`) runs it instead as a plain
+Kubernetes `Deployment`/`Service` in the `parapetai-gateway` namespace, on a
+dedicated node pool (`gwpool`, labeled `parapet.run/pool=gateway`, cluster
+autoscaler `0->2` nodes, `scaleDownMode: Delete` -- a scaled-to-0 node and
+its OS disk are both fully deleted, not just stopped). There are no
+provisioning scripts for this path in the repo; the cluster and node pool
+were created ad hoc via `az aks`/`az aks nodepool`.
+
+The `system` node pool (1 node, always on) is a hard AKS requirement and
+can't scale to 0 -- see cost notes below.
+
+**Static IP**: the public IP `57.162.235.209`
+(`kubernetes-a54356fbc28ad446196d8567838d7e6d` in the managed resource
+group) is bound to the `parapetai-gateway` Service, not to the node pool or
+any node -- it survives `gwpool` being scaled down, deleted, and rebuilt, as
+long as the Service object itself is never deleted.
+
+### Gateway is currently shut down
+
+As of 2026-09-22, `parapetai-gateway`'s Deployment is scaled to 0 replicas
+and `gwpool` is scaled to 0 nodes, to stop the ~$3.86/day (2 nodes) ->
+~$1.93/day (1 node) compute cost while it's unused. The `system` pool, Load
+Balancer, and both public IPs keep running regardless (~$3.43/day floor).
+
+**To restart it:**
+
+```bash
+az aks get-credentials -n parapet-gw-aks -g parapet-rg --overwrite-existing
+
+# Scale the Deployment back up -- the cluster autoscaler will spin up a
+# gwpool node automatically (~2-4 min cold start) once there's a pod that
+# needs one; no manual node pool scaling required.
+kubectl scale deployment parapetai-gateway -n parapetai-gateway --replicas=2
+
+# Watch it come up:
+kubectl get pods -n parapetai-gateway -w
+```
+
+Once both pods are `Running`/`Ready`, confirm the service is reachable
+(same IP/DNS name as before, unchanged by the shutdown):
+
+```bash
+curl https://parapet-gateway.eastus.cloudapp.azure.com/__parapetai/health
+# or: curl https://57.162.235.209/__parapetai/health
+```
+
+**To shut it down again:**
+
+```bash
+kubectl scale deployment parapetai-gateway -n parapetai-gateway --replicas=0
+```
+
+`gwpool` scales itself back down to 0 nodes automatically a few minutes
+after the last pod is gone (cluster autoscaler's default scale-down delay)
+-- no need to touch the node pool directly either way.
+
+### Known limitation: node pool OS disk is Premium, not Standard SSD
+
+AKS only exposes `Ephemeral` vs `Managed` for a node pool's OS disk type
+(`--node-osdisk-type`); there is no supported CLI/ARM knob to force a
+`Managed` OS disk onto `StandardSSD_LRS` instead of the auto-selected
+`Premium_LRS` -- Azure picks the SKU automatically for premium-IO-capable
+VM sizes. `Standard_D2als_v7` (this pool's size) also doesn't support
+`Ephemeral` (`EphemeralOSDiskSupported: false` -- no local/temp disk on this
+SKU), which would have been the actually-cheaper option (zero disk cost).
+Hand-editing the underlying VMSS's disk SKU directly is possible but
+unsupported: AKS reconciles its managed resource group and will revert
+out-of-band changes, so don't do that. In practice this matters less than
+it sounds, since `scaleDownMode: Delete` means the OS disk is deleted along
+with the node at 0 replicas -- the Premium-vs-StandardSSD gap only applies
+while a node is actually running to serve traffic, not to the idle floor.
