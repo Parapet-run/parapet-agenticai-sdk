@@ -16,13 +16,84 @@ token. Before this module, both tool calls carried the *same*
 was no way for Cedar, an audit record, or an operator console to see which
 credential actually reached which vendor.
 
-`access_identity` gives you a **declared** signal — the same trust class as
-`vendor_calls` (trusted but spoofable, not verified against the real
-outbound call): a `context.access_identity` object naming an identifier for
-the credential (never the credential's own secret value), its type, which
-vendor it was used against, and the endpoint it was presented to.
+`access_identity` gives you this signal in **three** ways, checked in
+order, with each falling back to the next:
 
-## Declaring a tool
+1. **Explicit decorator** (`@declare_access_identity`) or **framework-native
+   metadata** — a tool author's own assertion. Strongest signal, and the
+   only path that can name a real `type` (service account, PAT, OAuth
+   service principal, ...) or a `target_endpoint`.
+2. **Automatic inference** — zero extra code. If neither of the above is
+   present, every integration surface synthesizes an `AccessIdentity`
+   from whatever identity claims are *already ambient* at the time of the
+   tool call (via `governed_identity()`/`current_identity()`, or an RFC
+   8693 delegated-agent identity) plus the tool's own already-declared
+   `vendor_system` ([`vendor_calls`](vendor-calls.md)). This is what makes
+   the feature useful with **no per-tool work at all** for the common
+   case — see "Automatic inference" below.
+3. **Nothing** — `context.access_identity` is simply absent, same as
+   `vendor_system` being absent for an undeclared tool. Never guessed at.
+
+All three land on the exact same `Snapshot.access_identity` field and
+`context.access_identity` key — a policy or an operator console reading it
+never needs to know which of the three produced a given row (though
+`source` tells you: `declared`, `inferred`, `observed`, or `verified`).
+
+## Automatic inference (no declaration needed)
+
+The common case — you already scope identity per call with
+`governed_identity()`/`current_identity()`, and you already declare
+`vendor_calls` on your tools for resource scoping — needs **no new code**:
+
+```python
+from parapetai_agent.scoped_data import governed_identity
+from parapetai_agent.vendor_calls import VendorCallSpec, declare_vendor_call
+
+@declare_vendor_call(VendorCallSpec(
+    vendor_system="atlassian", resource_type="Issue", crud_action="create",
+))
+def create_issue(project: str) -> str: ...
+
+with governed_identity(claims=atlassian_service_creds):  # e.g. {"client_id": "..."}
+    await agent.run(prompt)
+```
+
+`create_issue`'s tool call automatically gets a `context.access_identity`
+of `{"id": "<the client_id from atlassian_service_creds>", "type":
+"unknown", "used_to_access": "atlassian", "source": "inferred"}` — no
+`@declare_access_identity`, no metadata dict, nothing tool-specific.
+
+`infer_access_identity()` (`parapetai_agent.access_identity`) is what does
+this, called by every integration surface only when neither of the two
+declared paths above produced anything:
+
+- **`id`** comes from whichever of the calling agent's own claims
+  (preferred) or the ambient end-user claims (fallback) carries
+  `client_id`, `azp`, `appid`, `oid`, or `sub` — checked in that order,
+  the same three RFC 8693/9068 delegation-claim names
+  `token_identity.agent_identity_from_claims()` already checks for the
+  agent identity, plus a bare subject-identifier fallback for the common
+  case of `governed_identity(claims=...)` used directly (which populates
+  only end-user `Identity.claims`, never `AgentIdentity` — see that
+  function's own module docstring).
+- **`used_to_access`** comes from the tool's own resolved `vendor_system`
+  — if a tool has no declared vendor metadata, there is nothing to infer
+  `used_to_access` from, so nothing is synthesized at all, even if
+  identity claims are ambient.
+- **`type`** is always `UNKNOWN` — this function has no way to know
+  whether a claims-derived id names a service account, a PAT, or an OAuth
+  service principal. Use an explicit declaration (below) when you want a
+  real `type` or a `target_endpoint`.
+- **`source`** is always `INFERRED` — a distinct, weaker tier than
+  `DECLARED` (nobody asserted *this specific credential*; it was
+  correlated after the fact from two already-ambient facts), which an
+  operator console or a policy can filter on separately.
+
+An explicit `@declare_access_identity`/metadata declaration on the same
+tool always **wins** over inference — this is a pure fallback, never an
+override of something more specific.
+
+## Declaring a tool explicitly
 
 ```python
 from parapetai_agent.access_identity import (
@@ -54,7 +125,7 @@ neither.
 | `used_to_access` | `str` | The vendor/system label, e.g. `"salesforce"` — same vocabulary as `VendorCallSpec.vendor_system`. |
 | `target_endpoint` | `str \| None` | The URL/host this credential was presented to. Sanitize before declaring it (no query string / tokens embedded in the URL). |
 | `scope` | `tuple[str, ...]` | OAuth scopes, an IAM role, or PAT scope labels, if known. |
-| `source` | `AccessIdentitySource` | `DECLARED` (default — this module's own trust class), `OBSERVED`, or `VERIFIED`. This module only ever produces `DECLARED`; the other two are reserved for a later corroboration/control-plane-verification pass. |
+| `source` | `AccessIdentitySource` | `DECLARED` (default — an explicit decorator/metadata assertion), `INFERRED` (this module's own automatic synthesis — see above), `OBSERVED`, or `VERIFIED`. Only the first two are produced today; the latter two are reserved for a later corroboration/control-plane-verification pass. |
 | `expires_at` | `str \| None` | ISO8601, only for credential types that carry an expiry. |
 
 The decorator attaches the identity to the **underlying Python callable**
@@ -89,19 +160,26 @@ An unrecognised `parapet_access_identity_type` value resolves to
 ## Per-framework wiring
 
 All four integration surfaces resolve access-identity metadata
-automatically once a tool carries it — same precedence as `vendor_calls`
-(metadata checked first, falling back to the decorator):
+automatically once a tool carries it, then fall back to
+`infer_access_identity()` when it doesn't — same precedence as
+`vendor_calls` for the declared half (metadata checked first, falling
+back to the decorator):
 
 - **MAF** (`ParapetFunctionMiddleware.process`): checks the decorator path
   on `context.function.func` (no native metadata dict on MAF's own tool
-  wrapper, same as `vendor_calls` there).
+  wrapper, same as `vendor_calls` there), then falls back to inference
+  from `_identity_claims`/`_agent_identity_claims`.
 - **ADK** (`before_tool_callback`/`after_tool_callback`): checks
   `tool.custom_metadata` first, falling back to the decorator on
-  `tool.func`.
+  `tool.func`, then to inference from the resolved `correlation.identity_claims`/
+  `correlation.agent_identity_claims`.
 - **LangGraph** (`ParapetAgentMiddleware._tool_snapshot`): checks
-  `tool.metadata` first, falling back to the decorator on `tool.func`.
+  `tool.metadata` first, falling back to the decorator on `tool.func`,
+  then to inference from `_effective_identity_claims`/
+  `_effective_agent_identity_claims`.
 - **`Governor.authorize_tool()`**: checks its own `metadata=` argument
-  first, falling back to the decorator on its own `func=` argument.
+  first, falling back to the decorator on its own `func=` argument, then
+  to inference from its own resolved `claims=`/`agent_claims=`.
   `Governor.tool()` resolves `func=f` automatically, same as it does for
   `vendor_calls`.
 

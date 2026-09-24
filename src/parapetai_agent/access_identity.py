@@ -29,6 +29,18 @@ password) -- only an identifier for the credential (a client_id, key id,
 service-account principal, or certificate CN/fingerprint). A caller that
 would otherwise pass a bare secret string here is misusing this module; it
 exists to fingerprint which credential was used, never to store it.
+
+A THIRD, automatic path exists too: `infer_access_identity()`, called by
+every integration surface only when neither of the two declared paths
+above produced anything, synthesizes an AccessIdentity from whatever
+identity claims are already ambient (agent or end-user) plus the tool's
+own already-declared `vendor_system` -- no `@declare_access_identity`
+call, no metadata dict, nothing tool-specific required. This is what makes
+the feature usable with zero extra developer effort for the common case:
+a caller who already does `with governed_identity(claims=service_creds):`
+around a tool call gets `context.access_identity` for free, with
+`source == "inferred"` marking it as a weaker signal than an explicit
+declaration (see AccessIdentitySource's own docstring).
 """
 
 from __future__ import annotations
@@ -57,13 +69,18 @@ class AccessIdentityType(StrEnum):
 
 
 class AccessIdentitySource(StrEnum):
-    """How confident this AccessIdentity is. DECLARED is this module's own
-    trust class (see module docstring); OBSERVED/VERIFIED describe stronger
-    evidence a later change can promote a DECLARED identity to, once
-    corroboration.py or a control-plane credential inventory can confirm
-    it -- neither is produced by this module today."""
+    """How confident this AccessIdentity is. DECLARED is a tool author's
+    own assertion (`@declare_access_identity`/metadata); INFERRED is this
+    module's own synthesis from ambient identity claims plus a declared
+    `vendor_system`, made with NO tool-specific input at all -- weaker than
+    DECLARED (nobody asserted "this credential" specifically, it was
+    correlated after the fact) but still better than nothing. OBSERVED/
+    VERIFIED describe stronger evidence a later change can promote either
+    of the above to, once corroboration.py or a control-plane credential
+    inventory can confirm it -- neither is produced by this module today."""
 
     DECLARED = "declared"
+    INFERRED = "inferred"
     OBSERVED = "observed"
     VERIFIED = "verified"
 
@@ -176,3 +193,62 @@ def resolve_access_identity_from_metadata(
         used_to_access=str(used_to_access),
         target_endpoint=metadata.get(ACCESS_IDENTITY_TARGET_ENDPOINT_KEY),
     )
+
+
+#: Priority order for picking a stable credential id out of a claims dict
+#: with no fixed shape -- client_id/azp/appid (RFC 9068 / OIDC Core's
+#: on-behalf-of/delegation conventions, same three
+#: token_identity.agent_identity_from_claims() already checks for the
+#: AGENT identity) first, then oid/sub (a bare subject identifier -- what's
+#: actually available when a caller sets ambient identity via
+#: scoped_data.governed_identity(claims=...) directly, which does NOT run
+#: agent_identity_from_claims() at all: that path only ever populates
+#: end-user Identity.claims, never AgentIdentity, so client_id/azp/appid
+#: will genuinely be absent there even for what is, in substance, a service
+#: credential's own id).
+_ID_CLAIM_KEYS = ("client_id", "azp", "appid", "oid", "sub")
+
+
+def infer_access_identity(
+    *,
+    agent_claims: Mapping[str, str] | None,
+    identity_claims: Mapping[str, str] | None,
+    vendor_system: str | None,
+) -> AccessIdentity | None:
+    """The automatic path -- no `@declare_access_identity`, no metadata,
+    nothing tool-specific at all. Synthesizes an AccessIdentity purely
+    from what's ALREADY ambient by the time a tool call is authorized: the
+    calling agent's own delegated-actor claims (preferred) or, failing
+    that, whatever end-user claims are ambient (the common shape when a
+    caller uses `governed_identity(claims=...)` directly to assert a
+    credential, since that path never populates AgentIdentity at all --
+    see `_ID_CLAIM_KEYS`'s own comment), combined with the tool's own
+    already-declared `vendor_system` (parapetai_agent.vendor_calls) for
+    `used_to_access`.
+
+    Returns None when there is nothing to synthesize from -- no
+    vendor_system (nothing to set `used_to_access` to) or no claims at all
+    (nothing to set `id` to). Never invents a `type`: this function cannot
+    know whether a claims-derived id names a service account, a PAT, or an
+    OAuth service principal, so `type` is always `UNKNOWN` here -- an
+    explicit `@declare_access_identity`/metadata declaration (checked
+    FIRST by every call site, this function only runs when that returned
+    None) is how a caller supplies a real type. `source` is always
+    `INFERRED`, never `DECLARED` -- see that enum member's own docstring
+    for why the distinction matters to an operator reading the audit
+    trail."""
+    if not vendor_system:
+        return None
+    for claims in (agent_claims, identity_claims):
+        if not claims:
+            continue
+        for key in _ID_CLAIM_KEYS:
+            value = claims.get(key)
+            if value:
+                return AccessIdentity(
+                    id=str(value),
+                    type=AccessIdentityType.UNKNOWN,
+                    used_to_access=vendor_system,
+                    source=AccessIdentitySource.INFERRED,
+                )
+    return None

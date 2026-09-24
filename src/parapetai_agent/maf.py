@@ -215,6 +215,7 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, Status, StatusCod
 
 from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
+from parapetai_agent.access_identity import infer_access_identity as _infer_access_identity
 from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.control_plane import bootstrap_engine
@@ -1090,7 +1091,13 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
             agent_identity_claims = _agent_identity_claims(context.kwargs)
             tool_args = _model_to_dict(context.arguments)
             vendor = _resolve_vendor_call(getattr(context.function, "func", None), tool_args)
-            access_identity = _resolve_access_identity(getattr(context.function, "func", None))
+            access_identity = _resolve_access_identity(
+                getattr(context.function, "func", None)
+            ) or _infer_access_identity(
+                agent_claims=agent_identity_claims,
+                identity_claims=identity_claims,
+                vendor_system=vendor[0] if vendor else None,
+            )
             snapshot = Snapshot(
                 provider=chat.provider,
                 endpoint="in-process:maf:tool_call",

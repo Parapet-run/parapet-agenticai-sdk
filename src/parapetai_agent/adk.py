@@ -154,6 +154,7 @@ from opentelemetry.trace import NonRecordingSpan, Span, SpanContext, Status, Sta
 
 from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
+from parapetai_agent.access_identity import infer_access_identity as _infer_access_identity
 from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
 from parapetai_agent.access_identity import (
     resolve_access_identity_from_metadata as _resolve_access_identity_from_metadata,
@@ -759,9 +760,15 @@ class ParapetPlugin(BasePlugin):
         vendor = _resolve_vendor_call_from_metadata(
             getattr(tool, "custom_metadata", None)
         ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
-        access_identity = _resolve_access_identity_from_metadata(
-            getattr(tool, "custom_metadata", None)
-        ) or _resolve_access_identity(getattr(tool, "func", None))
+        access_identity = (
+            _resolve_access_identity_from_metadata(getattr(tool, "custom_metadata", None))
+            or _resolve_access_identity(getattr(tool, "func", None))
+            or _infer_access_identity(
+                agent_claims=correlation.agent_identity_claims,
+                identity_claims=correlation.identity_claims,
+                vendor_system=vendor[0] if vendor else None,
+            )
+        )
         snapshot = Snapshot(
             provider=correlation.provider,
             endpoint="in-process:adk:tool_call",
@@ -826,9 +833,15 @@ class ParapetPlugin(BasePlugin):
             vendor = _resolve_vendor_call_from_metadata(
                 getattr(tool, "custom_metadata", None)
             ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
-            access_identity = _resolve_access_identity_from_metadata(
-                getattr(tool, "custom_metadata", None)
-            ) or _resolve_access_identity(getattr(tool, "func", None))
+            access_identity = (
+                _resolve_access_identity_from_metadata(getattr(tool, "custom_metadata", None))
+                or _resolve_access_identity(getattr(tool, "func", None))
+                or _infer_access_identity(
+                    agent_claims=correlation.agent_identity_claims,
+                    identity_claims=correlation.identity_claims,
+                    vendor_system=vendor[0] if vendor else None,
+                )
+            )
             response_snapshot = Snapshot(
                 provider=correlation.provider,
                 endpoint="in-process:adk:tool_call",

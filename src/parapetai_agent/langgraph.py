@@ -88,6 +88,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
+from parapetai_agent.access_identity import infer_access_identity as _infer_access_identity
 from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
 from parapetai_agent.access_identity import (
     resolve_access_identity_from_metadata as _resolve_access_identity_from_metadata,
@@ -530,18 +531,26 @@ class ParapetAgentMiddleware(AgentMiddleware):
         vendor = _resolve_vendor_call_from_metadata(
             getattr(tool, "metadata", None)
         ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
-        access_identity = _resolve_access_identity_from_metadata(
-            getattr(tool, "metadata", None)
-        ) or _resolve_access_identity(getattr(tool, "func", None))
+        identity_claims = _effective_identity_claims(None)
+        agent_identity_claims = _effective_agent_identity_claims(None)
+        access_identity = (
+            _resolve_access_identity_from_metadata(getattr(tool, "metadata", None))
+            or _resolve_access_identity(getattr(tool, "func", None))
+            or _infer_access_identity(
+                agent_claims=agent_identity_claims,
+                identity_claims=identity_claims,
+                vendor_system=vendor[0] if vendor else None,
+            )
+        )
         snapshot = Snapshot(
             provider="langgraph",
             endpoint="in-process:langgraph:tool_call",
             parsed=True,
             tool_name=str(tool_call.get("name", "")),
             tool_args=tool_args,
-            identity_claims=_effective_identity_claims(None),
+            identity_claims=identity_claims,
             identity_roles=_effective_identity_roles(None),
-            agent_identity_claims=_effective_agent_identity_claims(None),
+            agent_identity_claims=agent_identity_claims,
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,

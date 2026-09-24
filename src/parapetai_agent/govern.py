@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
 from parapetai_agent import observation as _observation
 from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequired
+from parapetai_agent.access_identity import infer_access_identity as _infer_access_identity
 from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
 from parapetai_agent.access_identity import (
     resolve_access_identity_from_metadata as _resolve_access_identity_from_metadata,
@@ -646,14 +647,25 @@ class Governor:
         `parapetai_agent.access_identity.declare_access_identity` /
         `resolve_access_identity_from_metadata`. Distinct from
         `agent_claims` above (the calling agent's own identity for the
-        whole trace, not per-tool) — see that module's docstring.
+        whole trace, not per-tool) — see that module's docstring. When
+        neither resolves anything, `infer_access_identity()` synthesizes
+        one automatically from `agent_claims`/`claims` plus the resolved
+        `vendor_system` — no decorator or metadata required at all (see
+        that function's own docstring for exactly what it can and can't
+        infer).
         """
         claims_d, roles_l, agent_claims_d = self._identity(claims, roles, agent_claims)
         args = dict(arguments or {})
         vendor = _resolve_vendor_call_from_metadata(metadata) or _resolve_vendor_call(func, args)
-        access_identity = _resolve_access_identity_from_metadata(
-            metadata
-        ) or _resolve_access_identity(func)
+        access_identity = (
+            _resolve_access_identity_from_metadata(metadata)
+            or _resolve_access_identity(func)
+            or _infer_access_identity(
+                agent_claims=agent_claims_d,
+                identity_claims=claims_d,
+                vendor_system=vendor[0] if vendor else None,
+            )
+        )
         snap = Snapshot(
             provider=_PROVIDER,
             endpoint="in-process:govern:tool_call",

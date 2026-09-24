@@ -12,10 +12,16 @@ All notable changes to this project are documented here. The format is based on
   service account, personal access token, OAuth service principal, API
   key, static secret, mTLS — `used_to_access`, `target_endpoint`,
   `scope`, `source`, `expires_at`), distinct from the calling agent's own
-  identity (which is one identity per trace, not per tool). Same
-  declared-not-observed trust class and same two resolution paths
-  (`@declare_access_identity` decorator / framework-native metadata dict)
-  as `vendor_calls.py`, mirrored across `Governor`, MAF, ADK, and
+  identity (which is one identity per trace, not per tool). Three
+  resolution paths, checked in order: an explicit `@declare_access_identity`
+  decorator, a framework-native metadata dict (same two paths
+  `vendor_calls.py` uses), or — new, and requiring no per-tool code at
+  all — `infer_access_identity()`, which synthesizes one automatically
+  from whatever identity claims are already ambient
+  (`governed_identity()`/`current_identity()`, or an RFC 8693
+  delegated-agent identity) plus the tool's own already-declared
+  `vendor_system`, tagged `source: "inferred"` to distinguish it from an
+  explicit declaration. Mirrored across `Governor`, MAF, ADK, and
   LangGraph. Reaches Cedar as `context.access_identity`; never stripped
   by `content_free()`. See docs/reference/access-identity.md.
 

@@ -759,6 +759,40 @@ class TestToolAccessIdentityMetadata:
 
         assert resp is None
 
+    async def test_inferred_from_ambient_identity_and_declared_vendor(
+        self, tmp_path: Path
+    ) -> None:
+        """No @declare_access_identity at all -- the automatic path, using
+        the real ambient-identity mechanism (current_identity(), what
+        governed_identity(claims=...) dispatches to)."""
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_atlassian_client")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.id == "atlassian-client-id" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-inferred-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        @declare_vendor_call(
+            VendorCallSpec(vendor_system="atlassian", resource_type="Issue", crud_action="create")
+        )
+        def create_issue(project: str) -> str:
+            return project
+
+        tool = AdkFunctionTool(func=create_issue)
+        ctx = _FakeToolContext(invocation_id="inv-access-identity-4")
+
+        with current_identity(claims={"client_id": "atlassian-client-id"}):
+            resp = await plugin.before_tool_callback(
+                tool=tool, tool_args={"project": "PROJ"}, tool_context=ctx
+            )
+
+        assert resp is not None
+        assert "GOVERNANCE_DENIED" in resp["error"]
+
 
 class TestIdentityResolution:
     async def test_session_user_id_is_not_used_by_default(self) -> None:

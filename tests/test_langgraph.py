@@ -77,6 +77,23 @@ delete_salesforce_case.metadata = {
 }
 
 
+@tool
+def create_issue(project: str) -> str:
+    """Create an Atlassian issue."""
+    return project
+
+
+# Only vendor metadata declared, deliberately no access_identity_* keys --
+# the tool this test's inference case needs, distinct from
+# delete_salesforce_case above (which already carries an explicit
+# access_identity declaration and so can't exercise the automatic path).
+create_issue.metadata = {
+    "parapet_vendor_system": "atlassian",
+    "parapet_resource_type": "Issue",
+    "parapet_crud_action": "create",
+}
+
+
 def _agent(tool_name: str, args: dict, middleware: ParapetAgentMiddleware):
     model = _FakeModel(
         messages=iter(
@@ -87,7 +104,9 @@ def _agent(tool_name: str, args: dict, middleware: ParapetAgentMiddleware):
         )
     )
     return create_agent(
-        model, tools=[lookup_order, execute_shell, delete_salesforce_case], middleware=[middleware]
+        model,
+        tools=[lookup_order, execute_shell, delete_salesforce_case, create_issue],
+        middleware=[middleware],
     )
 
 
@@ -237,6 +256,31 @@ def test_tool_call_reads_access_identity_metadata_off_request_tool(tmp_path: Pat
     agent = _agent("delete_salesforce_case", {"case_id": "500x"}, mw)
     with pytest.raises(GovernanceDenied) as exc_info:
         agent.invoke({"messages": [{"role": "user", "content": "x"}]})
+    assert len(exc_info.value.decision.determining_policies) == 1
+
+
+def test_tool_call_infers_access_identity_from_ambient_identity_and_declared_vendor(
+    tmp_path: Path,
+) -> None:
+    """No access_identity_* metadata at all on create_issue -- the
+    automatic path, using the real ambient-identity mechanism
+    (governed_identity(), what a caller actually wraps agent.invoke() in)
+    combined with create_issue's own declared vendor metadata."""
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("no_atlassian_client")\n'
+        'forbid(principal, action == Action::"tool_call", resource)\n'
+        'when { context has access_identity '
+        '&& context.access_identity.id == "atlassian-client-id" };',
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+    agent = _agent("create_issue", {"project": "PROJ"}, mw)
+    with pytest.raises(GovernanceDenied) as exc_info:
+        with governed_identity(claims={"client_id": "atlassian-client-id"}):
+            agent.invoke({"messages": [{"role": "user", "content": "x"}]})
     assert len(exc_info.value.decision.determining_policies) == 1
 
 

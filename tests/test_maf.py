@@ -945,6 +945,43 @@ class TestToolAccessIdentityMetadata:
         assert called["ran"] is True
         assert ctx.result == "handled 500x"
 
+    async def test_inferred_from_ambient_identity_and_declared_vendor(
+        self, tmp_path: Path
+    ) -> None:
+        """No @declare_access_identity at all -- the automatic path, using
+        the real ambient-identity mechanism (current_identity(), what
+        governed_identity(claims=...) dispatches to) a caller would
+        actually use around agent.run(), combined with a declared
+        vendor_call (a separate, pre-existing declaration most callers
+        already write for resource scoping)."""
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_atlassian_client")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.id == "atlassian-client-id" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-inferred-test", tenant="default")
+        mw = ParapetFunctionMiddleware(engine, caller)
+
+        @declare_vendor_call(
+            VendorCallSpec(vendor_system="atlassian", resource_type="Issue", crud_action="create")
+        )
+        def create_issue(project: str) -> str:
+            return project
+
+        fn = FunctionTool(name="create_issue", func=create_issue)
+        ctx = FunctionInvocationContext(function=fn, arguments={"project": "PROJ"})
+
+        async def call_next() -> None:
+            ctx.result = create_issue("PROJ")
+
+        with current_identity(claims={"client_id": "atlassian-client-id"}):
+            await mw.process(ctx, call_next)
+
+        assert "GOVERNANCE_DENIED" in str(ctx.result)
+
 
 # ── identity claims passthrough ─────────────────────────────────────────────
 

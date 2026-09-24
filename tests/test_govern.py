@@ -424,6 +424,93 @@ class TestAccessIdentityMetadata:
         assert ran["called"] is False
 
 
+class TestAccessIdentityAutoInferred:
+    """No @declare_access_identity, no metadata -- the automatic path,
+    proving authorize_tool() synthesizes context.access_identity purely
+    from ambient identity claims (claims=/agent_claims=) plus a declared
+    vendor_system. Mirrors the real usage pattern this feature exists
+    for: `with governed_identity(claims=service_creds): ...` around a tool
+    call that only ever declares vendor_calls, never access_identity."""
+
+    POLICY = (
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("no_access_identity")\n'
+        'forbid(principal, action == Action::"tool_call", resource)\n'
+        'when { context has access_identity '
+        '&& context.access_identity.id == "atlassian-client-id" };'
+    )
+
+    def test_inferred_from_claims_kwarg_and_declared_vendor_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, "00-base.cedar", self.POLICY)
+        gov = Governor.from_policy_dir(tmp_path)
+        with pytest.raises(GovernanceDenied):
+            gov.authorize_tool(
+                "create_issue",
+                {"project": "PROJ"},
+                claims={"client_id": "atlassian-client-id"},
+                metadata={
+                    "parapet_vendor_system": "atlassian",
+                    "parapet_resource_type": "Issue",
+                    "parapet_crud_action": "create",
+                },
+            )
+
+    def test_no_vendor_metadata_means_no_inference_even_with_claims(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing to set used_to_access to -- must not synthesize a
+        half-formed AccessIdentity just because claims happen to be
+        ambient."""
+        _write(tmp_path, "00-base.cedar", self.POLICY)
+        gov = Governor.from_policy_dir(tmp_path)
+        d = gov.authorize_tool(
+            "lookup_order", {"order_id": "A1001"}, claims={"client_id": "atlassian-client-id"}
+        )
+        assert d.allowed is True
+
+    def test_explicit_declaration_still_wins_over_inference(self, tmp_path: Path) -> None:
+        """An explicit @declare_access_identity/metadata declaration is a
+        stronger signal than an inferred one -- must take precedence, not
+        get silently overridden."""
+        _write(
+            tmp_path,
+            "00-base.cedar",
+            'permit(principal, action == Action::"model_call", resource);\n'
+            'permit(principal, action == Action::"tool_call", resource);\n'
+            '@id("no_declared_id")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.id == "explicit-service-account" };',
+        )
+        gov = Governor.from_policy_dir(tmp_path)
+
+        @declare_access_identity(
+            AccessIdentity(
+                id="explicit-service-account",
+                type=AccessIdentityType.SERVICE_ACCOUNT,
+                used_to_access="atlassian",
+            )
+        )
+        def create_issue(project: str) -> str:
+            return project
+
+        with pytest.raises(GovernanceDenied):
+            gov.authorize_tool(
+                "create_issue",
+                {"project": "PROJ"},
+                claims={"client_id": "some-other-client-id"},
+                func=create_issue,
+                metadata={
+                    "parapet_vendor_system": "atlassian",
+                    "parapet_resource_type": "Issue",
+                    "parapet_crud_action": "create",
+                },
+            )
+
+
 class TestVendorScopedResources:
     """vendor_scoped_resources=True switches Cedar's `resource` itself,
     same behavior maf.py/adk.py/langgraph.py already have -- proves
