@@ -14,9 +14,12 @@ adding a field must not silently become an implicit allow.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
+
+if TYPE_CHECKING:
+    from parapetai_agent.access_identity import AccessIdentity
 
 log = structlog.get_logger(__name__)
 
@@ -92,6 +95,16 @@ class Snapshot:
     vendor_system: str | None = None
     vendor_operation: str | None = None
     crud_action: str | None = None
+    # The credential THIS tool call presented to reach vendor_system --
+    # distinct from agent_identity_claims (the calling agent's own identity
+    # for the whole trace) and from vendor_system/crud_action above (which
+    # system/operation, not which credential reached it). See
+    # parapetai_agent.access_identity's module docstring for the
+    # Salesforce-OAuth-SP vs. Atlassian-PAT motivating example. Declared,
+    # not observed -- same trust class as vendor_system. None for every
+    # model_call and for a tool call with no declared access-identity
+    # metadata at all.
+    access_identity: AccessIdentity | None = None
     # auth-integrations.md §10.7: which in-process adapter produced this
     # snapshot -- "maf" | "adk" | "langgraph" | "governor". None for a
     # parser-built Snapshot (the gateway/MCP path identifies itself
@@ -126,6 +139,8 @@ class Snapshot:
             ctx["vendor_system"] = self.vendor_system
             ctx["vendor_operation"] = self.vendor_operation
             ctx["crud_action"] = self.crud_action
+        if self.access_identity:
+            ctx["access_identity"] = self.access_identity.to_dict()
         if self.framework:
             ctx["framework"] = self.framework
         if self.response_preview:

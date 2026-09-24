@@ -15,6 +15,11 @@ from typing import Any
 import pytest
 
 from parapetai_agent import GovernanceDenied, Governor
+from parapetai_agent.access_identity import (
+    AccessIdentity,
+    AccessIdentityType,
+    declare_access_identity,
+)
 from parapetai_agent.policy.engine import Decision
 from parapetai_agent.providers.parsers import Snapshot
 from parapetai_agent.vendor_calls import VendorCallSpec, declare_vendor_call
@@ -342,6 +347,81 @@ class TestVendorMetadata:
         with pytest.raises(GovernanceDenied):
             delete_salesforce_case(case_id="500x")
         assert ran["delete"] is False
+
+
+class TestAccessIdentityMetadata:
+    """authorize_tool()'s func=/metadata= resolve context.access_identity
+    the same way they resolve context.vendor_system -- mirrors
+    TestVendorMetadata above."""
+
+    POLICY = (
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("no_static_secret")\n'
+        'forbid(principal, action == Action::"tool_call", resource)\n'
+        'when { context has access_identity '
+        '&& context.access_identity.type == "static_secret" };'
+    )
+
+    def test_metadata_dict_reaches_cedar(self, tmp_path: Path) -> None:
+        _write(tmp_path, "00-base.cedar", self.POLICY)
+        gov = Governor.from_policy_dir(tmp_path)
+        with pytest.raises(GovernanceDenied):
+            gov.authorize_tool(
+                "legacy_request",
+                {"id": "1"},
+                metadata={
+                    "parapet_access_identity_id": "legacy-key-1",
+                    "parapet_access_identity_type": "static_secret",
+                    "parapet_access_identity_used_to_access": "legacy_system",
+                },
+            )
+
+    def test_undeclared_tool_is_unaffected(self, tmp_path: Path) -> None:
+        _write(tmp_path, "00-base.cedar", self.POLICY)
+        gov = Governor.from_policy_dir(tmp_path)
+        d = gov.authorize_tool("lookup_order", {"order_id": "A1001"})
+        assert d.allowed is True
+
+    def test_declare_access_identity_func_reaches_cedar(self, tmp_path: Path) -> None:
+        _write(tmp_path, "00-base.cedar", self.POLICY)
+        gov = Governor.from_policy_dir(tmp_path)
+
+        @declare_access_identity(
+            AccessIdentity(
+                id="legacy-key-1",
+                type=AccessIdentityType.STATIC_SECRET,
+                used_to_access="legacy_system",
+            )
+        )
+        def call_legacy_system(id: str) -> str:
+            return id
+
+        with pytest.raises(GovernanceDenied):
+            gov.authorize_tool("call_legacy_system", {"id": "1"}, func=call_legacy_system)
+
+    def test_tool_decorator_resolves_declare_access_identity_automatically(
+        self, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, "00-base.cedar", self.POLICY)
+        gov = Governor.from_policy_dir(tmp_path)
+        ran = {"called": False}
+
+        @gov.tool
+        @declare_access_identity(
+            AccessIdentity(
+                id="legacy-key-1",
+                type=AccessIdentityType.STATIC_SECRET,
+                used_to_access="legacy_system",
+            )
+        )
+        def call_legacy_system(id: str) -> str:
+            ran["called"] = True
+            return id
+
+        with pytest.raises(GovernanceDenied):
+            call_legacy_system(id="1")
+        assert ran["called"] is False
 
 
 class TestVendorScopedResources:

@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`parapetai_agent.access_identity`**: declares which downstream
+  credential a tool call presented (`AccessIdentity`: `id`, `type` —
+  service account, personal access token, OAuth service principal, API
+  key, static secret, mTLS — `used_to_access`, `target_endpoint`,
+  `scope`, `source`, `expires_at`), distinct from the calling agent's own
+  identity (which is one identity per trace, not per tool). Same
+  declared-not-observed trust class and same two resolution paths
+  (`@declare_access_identity` decorator / framework-native metadata dict)
+  as `vendor_calls.py`, mirrored across `Governor`, MAF, ADK, and
+  LangGraph. Reaches Cedar as `context.access_identity`; never stripped
+  by `content_free()`. See docs/reference/access-identity.md.
+
 ## [0.16.0]
 
 ### Added

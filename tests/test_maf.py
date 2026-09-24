@@ -57,6 +57,11 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from azure.identity import AzureCliCredential
 from httpx import Response
 
+from parapetai_agent.access_identity import (
+    AccessIdentity,
+    AccessIdentityType,
+    declare_access_identity,
+)
 from parapetai_agent.governance_runtime import resolve_local_output_settings
 from parapetai_agent.identity import ANONYMOUS, Caller
 from parapetai_agent.maf import (
@@ -849,6 +854,79 @@ class TestToolVendorCrudMetadata:
         )
         engine = PolicyEngine(policy_dir)
         caller = Caller(agent_id="vendor-crud-unaffected-test", tenant="default")
+        mw = ParapetFunctionMiddleware(engine, caller)
+
+        def undeclared_tool(case_id: str) -> str:
+            return f"handled {case_id}"
+
+        fn = FunctionTool(name="undeclared_tool", func=undeclared_tool)
+        ctx = FunctionInvocationContext(function=fn, arguments={"case_id": "500x"})
+        called = {"ran": False}
+
+        async def call_next() -> None:
+            called["ran"] = True
+            ctx.result = undeclared_tool("500x")
+
+        await mw.process(ctx, call_next)
+
+        assert called["ran"] is True
+        assert ctx.result == "handled 500x"
+
+
+class TestToolAccessIdentityMetadata:
+    """Same wiring point as TestToolVendorCrudMetadata above, proving
+    ParapetFunctionMiddleware.process() also resolves context.access_identity,
+    not just context.vendor_system/crud_action."""
+
+    async def test_declared_access_identity_drives_a_real_cedar_decision(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_service_account")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.type == "service_account" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-test", tenant="default")
+        mw = ParapetFunctionMiddleware(engine, caller)
+
+        @declare_access_identity(
+            AccessIdentity(
+                id="salesforce-sa@example.iam",
+                type=AccessIdentityType.SERVICE_ACCOUNT,
+                used_to_access="salesforce",
+            )
+        )
+        def delete_salesforce_case(case_id: str) -> str:
+            return f"deleted {case_id}"
+
+        fn = FunctionTool(name="delete_salesforce_case", func=delete_salesforce_case)
+        ctx = FunctionInvocationContext(function=fn, arguments={"case_id": "500x"})
+        called = {"ran": False}
+
+        async def call_next() -> None:
+            called["ran"] = True
+            ctx.result = delete_salesforce_case("500x")
+
+        await mw.process(ctx, call_next)
+
+        assert called["ran"] is False
+        assert "GOVERNANCE_DENIED" in str(ctx.result)
+
+    async def test_a_tool_with_no_declared_access_identity_is_unaffected(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_service_account")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.type == "service_account" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-unaffected-test", tenant="default")
         mw = ParapetFunctionMiddleware(engine, caller)
 
         def undeclared_tool(case_id: str) -> str:

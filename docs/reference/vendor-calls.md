@@ -235,6 +235,9 @@ restart), not mid-process.
 
 ## See also
 
+- [Per-tool credential metadata](access-identity.md) — the companion
+  "which credential did this tool call use" declaration, a separate
+  question from what this module answers.
 - [Corroboration](corroboration.md) — the observed, harder-to-spoof
   signal layered on top of this declared one.
 - [Automatic vendor/resource/permission detection](vendor-scope-permission.md) —

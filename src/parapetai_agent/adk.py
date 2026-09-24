@@ -154,6 +154,10 @@ from opentelemetry.trace import NonRecordingSpan, Span, SpanContext, Status, Sta
 
 from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
+from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
+from parapetai_agent.access_identity import (
+    resolve_access_identity_from_metadata as _resolve_access_identity_from_metadata,
+)
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.control_plane import bootstrap_engine
 from parapetai_agent.governance_runtime import GovernanceDenied as GovernanceDenied
@@ -755,6 +759,9 @@ class ParapetPlugin(BasePlugin):
         vendor = _resolve_vendor_call_from_metadata(
             getattr(tool, "custom_metadata", None)
         ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
+        access_identity = _resolve_access_identity_from_metadata(
+            getattr(tool, "custom_metadata", None)
+        ) or _resolve_access_identity(getattr(tool, "func", None))
         snapshot = Snapshot(
             provider=correlation.provider,
             endpoint="in-process:adk:tool_call",
@@ -768,6 +775,7 @@ class ParapetPlugin(BasePlugin):
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
+            access_identity=access_identity,
             framework="adk",
         )
         # COST-TRACK-1: scope_id is the TRIGGERING model_call's own span id
@@ -818,6 +826,9 @@ class ParapetPlugin(BasePlugin):
             vendor = _resolve_vendor_call_from_metadata(
                 getattr(tool, "custom_metadata", None)
             ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
+            access_identity = _resolve_access_identity_from_metadata(
+                getattr(tool, "custom_metadata", None)
+            ) or _resolve_access_identity(getattr(tool, "func", None))
             response_snapshot = Snapshot(
                 provider=correlation.provider,
                 endpoint="in-process:adk:tool_call",
@@ -831,6 +842,7 @@ class ParapetPlugin(BasePlugin):
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,
+                access_identity=access_identity,
                 framework="adk",
             )
             trace_id, scope_id = _tool_call_cost_ids(correlation, span) if span else (None, None)

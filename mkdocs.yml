@@ -104,6 +104,7 @@ nav:
       - governed_identity: reference/governed-identity.md
       - Gateway verified identity: reference/gateway-identity.md
       - Vendor/CRUD metadata: reference/vendor-calls.md
+      - Per-tool credential metadata: reference/access-identity.md
       - Corroboration: reference/corroboration.md
       - Automatic vendor/resource/permission detection: reference/vendor-scope-permission.md
       - Cost & token tracking: reference/cost-tracking.md

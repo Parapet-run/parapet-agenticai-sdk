@@ -88,6 +88,10 @@ from opentelemetry.trace import Status, StatusCode
 
 from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
+from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
+from parapetai_agent.access_identity import (
+    resolve_access_identity_from_metadata as _resolve_access_identity_from_metadata,
+)
 from parapetai_agent.control_plane import bootstrap_engine
 from parapetai_agent.governance_runtime import GovernanceDenied as GovernanceDenied
 from parapetai_agent.governance_runtime import audit as _audit
@@ -526,6 +530,9 @@ class ParapetAgentMiddleware(AgentMiddleware):
         vendor = _resolve_vendor_call_from_metadata(
             getattr(tool, "metadata", None)
         ) or _resolve_vendor_call(getattr(tool, "func", None), tool_args)
+        access_identity = _resolve_access_identity_from_metadata(
+            getattr(tool, "metadata", None)
+        ) or _resolve_access_identity(getattr(tool, "func", None))
         snapshot = Snapshot(
             provider="langgraph",
             endpoint="in-process:langgraph:tool_call",
@@ -538,6 +545,7 @@ class ParapetAgentMiddleware(AgentMiddleware):
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
+            access_identity=access_identity,
             framework="langgraph",
         )
         # COST-TRACK: scope_id is the TRIGGERING model_call's own span id

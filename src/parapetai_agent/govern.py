@@ -45,6 +45,10 @@ if TYPE_CHECKING:
 
 from parapetai_agent import observation as _observation
 from parapetai_agent._exceptions import GovernanceDenied, GovernanceReviewRequired
+from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
+from parapetai_agent.access_identity import (
+    resolve_access_identity_from_metadata as _resolve_access_identity_from_metadata,
+)
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.governance_runtime import OTEL_SDK_MISSING_MESSAGE
 from parapetai_agent.governance_runtime import configure_otel as _configure_otel
@@ -634,10 +638,22 @@ class Governor:
         LangGraph already produce — a control-plane connector-catalog
         match (or a hand-written Cedar policy) that reads those fields
         needs no special case for "this call came through Governor."
+
+        The same `func`/`metadata` also resolve a declared
+        `context.access_identity` — the credential THIS tool call
+        presented (e.g. a Salesforce OAuth service principal vs. an
+        Atlassian personal access token), via
+        `parapetai_agent.access_identity.declare_access_identity` /
+        `resolve_access_identity_from_metadata`. Distinct from
+        `agent_claims` above (the calling agent's own identity for the
+        whole trace, not per-tool) — see that module's docstring.
         """
         claims_d, roles_l, agent_claims_d = self._identity(claims, roles, agent_claims)
         args = dict(arguments or {})
         vendor = _resolve_vendor_call_from_metadata(metadata) or _resolve_vendor_call(func, args)
+        access_identity = _resolve_access_identity_from_metadata(
+            metadata
+        ) or _resolve_access_identity(func)
         snap = Snapshot(
             provider=_PROVIDER,
             endpoint="in-process:govern:tool_call",
@@ -650,6 +666,7 @@ class Governor:
             vendor_system=vendor[0] if vendor else None,
             vendor_operation=vendor[1] if vendor else None,
             crud_action=vendor[2] if vendor else None,
+            access_identity=access_identity,
             framework="governor",
         )
         # COST-TRACK: scope_id is whatever check_input() last set (the
@@ -797,6 +814,9 @@ class Governor:
                 vendor_system="salesforce", resource_type="Case", crud_action="delete",
             ))
             def delete_salesforce_case(case_id: str) -> str: ...
+
+        `@declare_access_identity` (`parapetai_agent.access_identity`)
+        stacks the same way, for `context.access_identity`.
         """
 
         def deco(f: Callable[..., Any]) -> Callable[..., Any]:

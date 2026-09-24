@@ -215,6 +215,7 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, Status, StatusCod
 
 from parapetai_agent import observation as _observation
 from parapetai_agent import pep_identity
+from parapetai_agent.access_identity import resolve_access_identity as _resolve_access_identity
 from parapetai_agent.content_checks import ContentCheckConfig
 from parapetai_agent.control_plane import bootstrap_engine
 from parapetai_agent.governance_runtime import GovernanceDenied as GovernanceDenied
@@ -1089,6 +1090,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
             agent_identity_claims = _agent_identity_claims(context.kwargs)
             tool_args = _model_to_dict(context.arguments)
             vendor = _resolve_vendor_call(getattr(context.function, "func", None), tool_args)
+            access_identity = _resolve_access_identity(getattr(context.function, "func", None))
             snapshot = Snapshot(
                 provider=chat.provider,
                 endpoint="in-process:maf:tool_call",
@@ -1102,6 +1104,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,
+                access_identity=access_identity,
                 framework="maf",
             )
             _set_oi_attributes(
@@ -1154,6 +1157,7 @@ class ParapetFunctionMiddleware(FunctionMiddleware):
                 vendor_system=vendor[0] if vendor else None,
                 vendor_operation=vendor[1] if vendor else None,
                 crud_action=vendor[2] if vendor else None,
+                access_identity=access_identity,
             )
             # Tool calls consume no LLM tokens of their own, so nothing is
             # recorded here (record() is a model_call-only concern) -- but

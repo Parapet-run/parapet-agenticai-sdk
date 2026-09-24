@@ -48,6 +48,11 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.tools.function_tool import FunctionTool as AdkFunctionTool
 from google.genai import types
 
+from parapetai_agent.access_identity import (
+    AccessIdentity,
+    AccessIdentityType,
+    declare_access_identity,
+)
 from parapetai_agent.adk import (
     GovernedRunner,
     InMemoryGovernedRunner,
@@ -647,6 +652,106 @@ class TestToolVendorCrudMetadata:
 
         tool = AdkFunctionTool(func=undeclared_tool)
         ctx = _FakeToolContext(invocation_id="inv-vendor-3")
+
+        resp = await plugin.before_tool_callback(
+            tool=tool, tool_args={"case_id": "500x"}, tool_context=ctx
+        )
+
+        assert resp is None
+
+
+class TestToolAccessIdentityMetadata:
+    """Same wiring point as TestToolVendorCrudMetadata above, proving
+    before_tool_callback() also resolves context.access_identity, not just
+    context.vendor_system/crud_action."""
+
+    async def test_declared_access_identity_via_decorator_drives_a_real_cedar_decision(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_service_account")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.type == "service_account" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-decorator-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        @declare_access_identity(
+            AccessIdentity(
+                id="salesforce-sa@example.iam",
+                type=AccessIdentityType.SERVICE_ACCOUNT,
+                used_to_access="salesforce",
+            )
+        )
+        def delete_salesforce_case(case_id: str) -> str:
+            return f"deleted {case_id}"
+
+        tool = AdkFunctionTool(func=delete_salesforce_case)
+        ctx = _FakeToolContext(invocation_id="inv-access-identity-1")
+
+        with track_tool_denials() as denials:
+            resp = await plugin.before_tool_callback(
+                tool=tool, tool_args={"case_id": "500x"}, tool_context=ctx
+            )
+
+        assert resp is not None
+        assert "GOVERNANCE_DENIED" in resp["error"]
+        assert denials
+
+    async def test_declared_access_identity_via_custom_metadata_drives_a_real_cedar_decision(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_service_account")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.type == "service_account" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-metadata-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        def delete_incident(incident_id: str) -> str:
+            return f"deleted {incident_id}"
+
+        tool = AdkFunctionTool(func=delete_incident)
+        tool.custom_metadata = {
+            "parapet_access_identity_id": "servicenow-sa@example.iam",
+            "parapet_access_identity_type": "service_account",
+            "parapet_access_identity_used_to_access": "servicenow",
+        }
+        ctx = _FakeToolContext(invocation_id="inv-access-identity-2")
+
+        resp = await plugin.before_tool_callback(
+            tool=tool, tool_args={"incident_id": "INC-1"}, tool_context=ctx
+        )
+
+        assert resp is not None
+        assert "GOVERNANCE_DENIED" in resp["error"]
+
+    async def test_a_tool_with_no_declared_access_identity_is_unaffected(
+        self, tmp_path: Path
+    ) -> None:
+        policy_dir = _custom_policy_dir(
+            tmp_path,
+            '@id("no_service_account")\n'
+            'forbid(principal, action == Action::"tool_call", resource)\n'
+            'when { context has access_identity '
+            '&& context.access_identity.type == "service_account" };',
+        )
+        engine = PolicyEngine(policy_dir)
+        caller = Caller(agent_id="access-identity-unaffected-test", tenant="default")
+        plugin = ParapetPlugin(engine, caller)
+
+        def undeclared_tool(case_id: str) -> str:
+            return f"handled {case_id}"
+
+        tool = AdkFunctionTool(func=undeclared_tool)
+        ctx = _FakeToolContext(invocation_id="inv-access-identity-3")
 
         resp = await plugin.before_tool_callback(
             tool=tool, tool_args={"case_id": "500x"}, tool_context=ctx

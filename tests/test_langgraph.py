@@ -71,6 +71,9 @@ delete_salesforce_case.metadata = {
     "parapet_vendor_system": "salesforce",
     "parapet_resource_type": "Case",
     "parapet_crud_action": "delete",
+    "parapet_access_identity_id": "salesforce-sa@example.iam",
+    "parapet_access_identity_type": "service_account",
+    "parapet_access_identity_used_to_access": "salesforce",
 }
 
 
@@ -208,6 +211,27 @@ def test_tool_call_reads_vendor_metadata_off_request_tool(tmp_path: Path) -> Non
         '@id("no_deletes")\n'
         'forbid(principal, action == Action::"tool_call", resource)\n'
         'when { context has crud_action && context.crud_action == "delete" };',
+    )
+    mw = build_middleware(policy_dir=str(tmp_path))
+    agent = _agent("delete_salesforce_case", {"case_id": "500x"}, mw)
+    with pytest.raises(GovernanceDenied) as exc_info:
+        agent.invoke({"messages": [{"role": "user", "content": "x"}]})
+    assert len(exc_info.value.decision.determining_policies) == 1
+
+
+def test_tool_call_reads_access_identity_metadata_off_request_tool(tmp_path: Path) -> None:
+    """Same wiring point as the vendor-metadata test above, proving
+    _tool_snapshot also resolves context.access_identity from
+    request.tool.metadata, not just context.vendor_system."""
+    _write(
+        tmp_path,
+        "00-base.cedar",
+        'permit(principal, action == Action::"model_call", resource);\n'
+        'permit(principal, action == Action::"tool_call", resource);\n'
+        '@id("no_service_account")\n'
+        'forbid(principal, action == Action::"tool_call", resource)\n'
+        'when { context has access_identity '
+        '&& context.access_identity.type == "service_account" };',
     )
     mw = build_middleware(policy_dir=str(tmp_path))
     agent = _agent("delete_salesforce_case", {"case_id": "500x"}, mw)
