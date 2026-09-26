@@ -8,7 +8,8 @@ init   -- one-time setup in a target project: copies every packaged
           carries a templates/ subdirectory the skill reads from at
           generation time, unlike the others which are a single
           SKILL.md), parapet-install-prereqs/, parapet-audit/,
-          parapet-audit-fix/ -- into .claude/skills/, and prints the
+          parapet-audit-fix/, parapet-identity/ -- into .claude/skills/,
+          and prints the
           `claude mcp add` line to wire this server in. Does NOT touch
           any file outside .claude/skills/ -- instrumenting the
           project's own code is the calling agent's job, guided by
@@ -30,7 +31,16 @@ import shutil
 import sys
 from pathlib import Path
 
-_SKILLS = ("maf", "adk", "langgraph", "quickdemo", "install-prereqs", "audit", "audit-fix")
+_SKILLS = (
+    "maf",
+    "adk",
+    "langgraph",
+    "quickdemo",
+    "install-prereqs",
+    "audit",
+    "audit-fix",
+    "identity",
+)
 
 
 def _cmd_serve(_args: argparse.Namespace) -> None:
@@ -53,7 +63,7 @@ def _cmd_init(args: argparse.Namespace) -> None:
         print(f"Installed SKILL.md to {dest}")
     print()
     print(
-        "Seven skills installed -- parapet-maf (Microsoft Agent Framework),"
+        "Eight skills installed -- parapet-maf (Microsoft Agent Framework),"
         " parapet-adk (Google ADK), and parapet-langgraph (LangGraph/LangChain)"
         " each retrofit an EXISTING project using that framework;"
         " parapet-quickdemo generates a new, runnable identity-based"
@@ -63,7 +73,9 @@ def _cmd_init(args: argparse.Namespace) -> None:
         " others need them; parapet-audit runs a read-only static scan of an"
         " existing codebase for ungoverned model/tool calls, scored"
         " high/medium/low; parapet-audit-fix acts on that scan's report afterward,"
-        " wrapping flagged sites in GovernedAgent/GovernedRunner. An agent"
+        " wrapping flagged sites in GovernedAgent/GovernedRunner; parapet-identity"
+        " adds per-tool vendor/credential tracking (vendor_calls/access_identity)"
+        " on top of an already-governed project. An agent"
         " picks whichever matches what you're asking for, not from this"
         " command."
     )

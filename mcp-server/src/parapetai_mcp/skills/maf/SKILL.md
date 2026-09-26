@@ -178,6 +178,13 @@ Either way:
   drift from a specific deployment; the tool call is the source of
   truth).
 
+## See also
+
+Once this project is governed, **parapet-identity** adds per-tool
+vendor/credential tracking (`vendor_calls`/`access_identity`) on top —
+"which vendor did this tool call reach, which credential did it use." A
+separate, optional follow-up skill, not part of this one.
+
 ## Non-negotiables
 
 - Never print the agent secret, the cli token, or the contents of

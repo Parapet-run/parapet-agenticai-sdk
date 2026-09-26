@@ -87,6 +87,13 @@ finding is still present after a fix that should have addressed it,
 investigate why before moving on (a typo'd import, a construction site
 the fix missed) rather than reporting success prematurely.
 
+## See also
+
+This skill doesn't detect or fix missing per-tool vendor/credential
+tracking (`vendor_calls`/`access_identity`) — that's outside
+`parapet_audit_codebase`'s own findings entirely. If the user separately
+asks for that, once the project is governed, use **parapet-identity**.
+
 ## Non-negotiables
 
 - Never print the agent secret, the cli token, or the contents of

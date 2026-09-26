@@ -39,6 +39,33 @@ All three land on the exact same `Snapshot.access_identity` field and
 never needs to know which of the three produced a given row (though
 `source` tells you: `declared`, `inferred`, `observed`, or `verified`).
 
+## What's actually automatic today, per framework — be precise about this
+
+"Automatic inference" (path 2 above) only ever fills in `AccessIdentity.id`
+(from whatever's ambient) and `used_to_access` (from a tool's own resolved
+`vendor_system`). **`vendor_system` itself is never automatic on any
+framework today** — every tool still needs its own `@declare_vendor_call`
+(or framework-native metadata), because none of MAF/ADK/LangGraph/Governor
+exposes a "which vendor did this call reach" field the SDK could read
+without a declaration. Don't let "automatic inference" read as "zero
+instrumentation" — it removes the credential-`id` declaration, not the
+vendor declaration.
+
+| Framework | `vendor_system` | credential `id`/`type` |
+|---|---|---|
+| Governor / MAF / LangGraph | Manual — `@declare_vendor_call` always required | Automatic `id` via inference (path 2) once `governed_identity()`/`current_identity()` is set; `type` always `UNKNOWN` unless declared explicitly |
+| ADK | Manual — same as above | Same automatic inference applies today. **Not yet implemented, but the strongest candidate for a real zero-instrumentation path**: ADK's own `google.adk.auth.auth_credential.AuthCredential` (a genuinely general, typed credential model used across ADK's tool ecosystem, not MCP-specific) is already attached to any `MCPTool`/`BaseAuthenticatedTool` a developer configures for real auth — reachable as `tool._auth_config.raw_auth_credential` from inside `before_tool_callback`/`after_tool_callback`, which `adk.py` already receives `tool` in. Wiring this in would give `AccessIdentityType`/`id` for free, with no new developer-facing API, since a working authenticated ADK tool already supplies these fields for functional reasons. Track this as a planned enhancement, not a shipped one. |
+| Plain HTTP tool, no MCP, no framework wrapper | Manual, always | No ambient signal exists to observe at all — a bare `requests.post(url)` inside a tool function is invisible to every mechanism above; `governed_identity(claims=...)` + `@declare_vendor_call` is the floor, permanently, for this case |
+
+MAF's `MCPStreamableHTTPTool(header_provider=...)` is a genuine per-call
+credential-injection point for the real outbound HTTP header, but it's a
+one-way hook toward the wire — nothing reads its output back into Cedar's
+context automatically. It DOES read the same `function_invocation_kwargs`
+dict `_identity_claims()`/`_agent_identity_claims()` already read, so
+sourcing one claim from that shared dict for both the real header and
+`context.access_identity` is possible today, by hand — see MAF's own
+module docstring for the kwargs-sharing mechanism.
+
 ## Automatic inference (no declaration needed)
 
 The common case — you already scope identity per call with

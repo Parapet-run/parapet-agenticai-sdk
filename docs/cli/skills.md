@@ -1,6 +1,6 @@
 # Skills
 
-`parapetai-mcp init` installs seven Claude Code skills into
+`parapetai-mcp init` installs eight Claude Code skills into
 `.claude/skills/`. Each is a `SKILL.md` that tells an agent (Claude Code,
 or any other MCP client that reads skills) exactly which `parapet_*`
 [tools](mcp-tools.md) to call, in what order, and what never to do — they
@@ -109,6 +109,24 @@ pointed at `Governor` instead, never force-fit into a framework wrapper
 that doesn't apply), then re-runs the audit afterward to confirm the
 finding count actually dropped rather than just reporting "fixed."
 
+## `parapet-identity`
+
+Use when: an **already-governed** project (`parapet-maf`/`parapet-adk`/
+`parapet-langgraph` already applied) should also track which vendor and
+which downstream credential each tool call uses — "add vendor tracking to
+my tools", "which credential is each tool using", "instrument
+access_identity".
+
+Adds `@declare_vendor_call` (`parapetai_agent.vendor_calls`) to each tool
+that clearly reaches one identifiable vendor, and — only when the user
+wants a real credential *type* or endpoint recorded, not the default
+`unknown`-typed automatic inference — `@declare_access_identity`
+(`parapetai_agent.access_identity`). Explicit about what's automatic and
+what isn't per framework (none derives `vendor_system` on its own; the
+credential `id` half is automatic once `governed_identity()`/
+`current_identity()` is already in use, `type` isn't); never invents a
+vendor name, `crud_action`, or credential type the user hasn't confirmed.
+
 ## How they fit together
 
 ```mermaid
@@ -136,6 +154,10 @@ graph TD
     R -->|"maf findings"| F
     R -->|"adk findings"| H
     R --> P
+    U["user: track vendor/credential per tool"] --> V[parapet-identity]
+    F -.->|"already governed"| V
+    H -.->|"already governed"| V
+    T -.->|"already governed"| V
 ```
 
 Every skill is careful about two things that show up repeatedly in their
